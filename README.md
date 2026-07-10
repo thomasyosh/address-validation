@@ -132,7 +132,7 @@ Public APIs may need your company proxy. Keep the proxy URL out of git.
 ```powershell
 $env:HTTPS_PROXY = "http://your-company-proxy:port"
 $env:HTTP_PROXY = "http://your-company-proxy:port"
-$env:NO_PROXY = "ase.testingaddress.com,localhost,127.0.0.1"
+$env:NO_PROXY = "ase.testingaddress.com,10.77.242.157,10.0.0.0/8,localhost,127.0.0.1"
 ```
 
 Or use `ADDRESS_VALIDATION_HTTP_PROXY` / `ADDRESS_VALIDATION_HTTPS_PROXY`.
@@ -144,7 +144,7 @@ copy config.local.example.yaml config.local.yaml
 # edit config.local.yaml with your proxy URL
 ```
 
-`NO_PROXY` should include the intranet host `ase.testingaddress.com` so colleague endpoint traffic does not go through the public proxy.
+Intranet ASE uses private IP `10.77.242.157` with `force_direct: true` so it never goes through the company proxy (that path commonly causes HTTP 504). Public APIs still use the proxy when configured.
 
 ## Match summary table
 
@@ -173,7 +173,7 @@ Map data                       18120       90.60%
 
 | Name | URL | Method | Notes |
 |------|-----|--------|-------|
-| `ase_query_debug` | `https://ase.testingaddress.com/query_debug` | POST | Colleague endpoint (intranet). Body: `{"addresses":["<address>"]}` |
+| `ase_query_debug` | `https://10.77.242.157/query_debug` | POST | Colleague intranet API (IP + `Host: ase.testingaddress.com`). Body: `{"address":["<address>"]}` |
 | `als_hk` | `https://www.als.gov.hk/lookup?q=<address>` | GET | Returns `Easting`/`Northing` and `GeoAddress` CSUID |
 | `map_gov_hk` | `https://www.map.gov.hk/gs/api/v1.0.0/locationSearch?q=<address>` | GET | Returns `x`/`y` coordinates only |
 

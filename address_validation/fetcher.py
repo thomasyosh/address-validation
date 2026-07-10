@@ -68,6 +68,11 @@ def build_request(endpoint: dict[str, Any], address: str) -> dict[str, Any]:
     headers.setdefault("User-Agent", BROWSER_USER_AGENT)
     headers.setdefault("Accept", "application/json")
 
+    # When calling an intranet service by IP, keep the original hostname in Host.
+    host_header = endpoint.get("host_header") or request_settings.get("host_header")
+    if host_header:
+        headers["Host"] = host_header
+
     if address_in == "params":
         params[address_key] = address
     elif address_in == "json_array":
@@ -138,8 +143,8 @@ class AddressFetcher:
             headers={"User-Agent": BROWSER_USER_AGENT},
         )
 
-    def _client_for_url(self, url: str) -> httpx.Client:
-        bypass = host_bypasses_proxy(url, self.proxy_settings.no_proxy)
+    def _client_for_url(self, url: str, *, force_direct: bool = False) -> httpx.Client:
+        bypass = force_direct or host_bypasses_proxy(url, self.proxy_settings.no_proxy)
         if bypass or not self.proxy_settings.enabled:
             if self._direct_client is None:
                 self._direct_client = self._create_client(use_proxy=False)
@@ -148,9 +153,9 @@ class AddressFetcher:
             self._proxy_client = self._create_client(use_proxy=True)
         return self._proxy_client
 
-    def describe_route(self, url: str) -> str:
-        if host_bypasses_proxy(url, self.proxy_settings.no_proxy):
-            return "direct (NO_PROXY bypass — same as Chrome intranet)"
+    def describe_route(self, url: str, *, force_direct: bool = False) -> str:
+        if force_direct or host_bypasses_proxy(url, self.proxy_settings.no_proxy):
+            return "direct intranet (no company proxy)"
         if self.proxy_settings.enabled:
             return f"via proxy ({self.proxy_settings.redacted_summary()})"
         return "direct (no proxy configured)"
@@ -191,10 +196,14 @@ class AddressFetcher:
             limiter.wait()
             try:
                 owns_client = False
+                force_direct = bool(endpoint.get("force_direct", False))
                 if self._session_active:
-                    client = self._client_for_url(request["url"])
+                    client = self._client_for_url(request["url"], force_direct=force_direct)
                 else:
-                    bypass = host_bypasses_proxy(request["url"], self.proxy_settings.no_proxy)
+                    bypass = force_direct or host_bypasses_proxy(
+                        request["url"],
+                        self.proxy_settings.no_proxy,
+                    )
                     client = self._create_client(
                         use_proxy=self.proxy_settings.enabled and not bypass
                     )
@@ -396,8 +405,11 @@ def run_jobs_concurrently(
     log_info(f"Starting fetch: {total} requests")
     log_info(f"Endpoints: {', '.join(endpoint_names)}")
     for endpoint_name in endpoint_names:
-        sample_url = next(endpoint["url"] for endpoint, _ in jobs if endpoint["name"] == endpoint_name)
-        log_info(f"Route {endpoint_name}: {fetcher.describe_route(sample_url)}")
+        sample_endpoint = next(endpoint for endpoint, _ in jobs if endpoint["name"] == endpoint_name)
+        log_info(
+            f"Route {endpoint_name}: "
+            f"{fetcher.describe_route(sample_endpoint['url'], force_direct=bool(sample_endpoint.get('force_direct')))}"
+        )
     log_info(
         f"Workers={worker_count}, "
         f"default RPS={fetcher.performance.requests_per_second:g}/endpoint, "

@@ -59,13 +59,16 @@ benchmark:
     - map_gov_hk
 
 endpoints:
+  # Intranet ASE: prefer private IP to avoid company-proxy 504s.
   - name: ase_query_debug
     display_name: Ase testing query_debug
-    url: https://ase.testingaddress.com/query_debug
+    url: https://10.77.242.157/query_debug
+    host_header: ase.testingaddress.com
+    force_direct: true
     method: POST
     request:
       address_in: json_array
-      address_key: addresses
+      address_key: address
     response:
       selection: first_in_data_buckets
       data_path: data

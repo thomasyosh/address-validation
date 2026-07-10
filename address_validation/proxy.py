@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 
-DEFAULT_NO_PROXY = "ase.testingaddress.com,.testingaddress.com,localhost,127.0.0.1"
+# Intranet ASE host/IP must never go through the company proxy (504 otherwise).
+# Must be a single comma-separated string (not a tuple of fragments).
+DEFAULT_NO_PROXY = (
+    "ase.testingaddress.com,.testingaddress.com,10.77.242.157,10.0.0.0/8,localhost,127.0.0.1"
+)
 
 
 @dataclass
@@ -55,6 +60,39 @@ def merge_no_proxy(*values: str | None) -> str:
     return ",".join(entries)
 
 
+def is_private_or_local_host(hostname: str) -> bool:
+    host = hostname.strip().lower().strip("[]")
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
+    except ValueError:
+        return False
+
+
+def host_matches_no_proxy_entry(hostname: str, pattern: str) -> bool:
+    host = hostname.strip().lower().strip("[]")
+    entry = pattern.strip().lower()
+    if not entry:
+        return False
+    if entry == "*":
+        return True
+
+    # CIDR support, e.g. 10.0.0.0/8
+    if "/" in entry:
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+            ip = ipaddress.ip_address(host)
+            return ip in network
+        except ValueError:
+            return False
+
+    if entry.startswith("."):
+        return host.endswith(entry) or host == entry.lstrip(".")
+    return host == entry or host.endswith("." + entry)
+
+
 def host_bypasses_proxy(url: str, no_proxy: str | None) -> bool:
     """
     Return True when the URL host should skip the company proxy.
@@ -62,25 +100,18 @@ def host_bypasses_proxy(url: str, no_proxy: str | None) -> bool:
     Chrome PAC files usually bypass intranet hosts; Python must do this explicitly
     when a proxy is configured, otherwise intranet calls often return HTTP 504.
     """
-    if not no_proxy:
-        return False
-
     hostname = (urlsplit(url).hostname or "").lower()
     if not hostname:
         return False
 
-    for entry in no_proxy.split(","):
-        pattern = entry.strip().lower()
-        if not pattern:
-            continue
-        if pattern == "*":
-            return True
-        if pattern.startswith("."):
-            if hostname.endswith(pattern) or hostname == pattern.lstrip("."):
-                return True
-        elif hostname == pattern or hostname.endswith("." + pattern):
-            return True
-    return False
+    # Always bypass RFC1918 / local addresses.
+    if is_private_or_local_host(hostname):
+        return True
+
+    if not no_proxy:
+        return False
+
+    return any(host_matches_no_proxy_entry(hostname, entry) for entry in no_proxy.split(","))
 
 
 def get_proxy_settings(config: dict[str, Any] | None = None) -> ProxySettings:
@@ -136,12 +167,10 @@ def get_proxy_settings(config: dict[str, Any] | None = None) -> ProxySettings:
 
 
 def apply_no_proxy_env(settings: ProxySettings) -> None:
-    """Ensure NO_PROXY is visible to httpx trust_env handling when set locally."""
-    if settings.no_proxy:
-        # Always merge defaults so intranet hosts are not forced through proxy.
-        merged = merge_no_proxy(DEFAULT_NO_PROXY, os.environ.get("NO_PROXY"), settings.no_proxy)
-        os.environ["NO_PROXY"] = merged
-        os.environ["no_proxy"] = merged
+    """Ensure NO_PROXY is visible to tools that read environment variables."""
+    merged = merge_no_proxy(DEFAULT_NO_PROXY, os.environ.get("NO_PROXY"), settings.no_proxy)
+    os.environ["NO_PROXY"] = merged
+    os.environ["no_proxy"] = merged
 
 
 def _redact_proxy_url(url: str) -> str:
