@@ -1,0 +1,9 @@
+data/
+*.db
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+config.yaml
+config.local.yaml
+query_debug.json

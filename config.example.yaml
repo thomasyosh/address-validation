@@ -1,0 +1,98 @@
+# Copy this file to config.yaml and update with your real endpoint URLs.
+
+database:
+  path: data/address_validation.db
+
+dataset:
+  path: data/address.xlsx
+  id_column: id
+  eaddress_column: EADDRESS
+  caddress_column: CADDRESS
+  easting_column: EASTING
+  northing_column: NORTHING
+  building_csuid_column: BUILDING_CSUID
+
+# Recommended: coordinates within N metres of EASTING/NORTHING.
+# Beyond this radius is treated as "not_found".
+# building_csuid is optional (ALS GeoAddress) and not recommended as primary standard.
+comparison:
+  criteria: coordinates
+  coordinate_tolerance_meters: 50
+  coordinate_fields:
+    easting: easting
+    northing: northing
+
+defaults:
+  timeout_seconds: 30
+  headers:
+    Accept: application/json
+    Content-Type: application/json
+
+# Throughput controls for large datasets (20k-50k addresses x 3 endpoints).
+performance:
+  workers: 6
+  requests_per_second: 4
+  max_retries: 5
+  retry_backoff_seconds: 1.5
+  # Common block / overload codes: 429, 403, 502, 503, 504, 408
+  retry_status_codes: [429, 403, 408, 500, 502, 503, 504]
+  progress_every: 100
+  # Commit each successful fetch promptly so crashes do not lose progress.
+  batch_save_size: 1
+
+routine:
+  endpoint: ase_query_debug
+
+benchmark:
+  baseline_endpoint: ase_query_debug
+  endpoints:
+    - ase_query_debug
+    - als_hk
+    - map_gov_hk
+
+endpoints:
+  - name: ase_query_debug
+    display_name: Ase testing query_debug
+    url: https://ase.testingaddress.com/query_debug
+    method: POST
+    request:
+      address_in: json_array
+      address_key: addresses
+    response:
+      selection: first_in_data_buckets
+      data_path: data
+      coordinate_fields:
+        easting: easting
+        northing: northing
+      building_csuid_path: building_csuid
+
+  - name: als_hk
+    display_name: ALS
+    url: https://www.als.gov.hk/lookup
+    method: GET
+    rate_limit:
+      requests_per_second: 2
+    request:
+      address_in: params
+      address_key: q
+    response:
+      selection: first_in_path
+      array_path: SuggestedAddress
+      item_coordinates_path: Address.PremisesAddress.GeospatialInformation
+      coordinate_fields:
+        easting: Easting
+        northing: Northing
+      building_csuid_path: Address.PremisesAddress.GeoAddress
+
+  - name: map_gov_hk
+    display_name: Map data
+    url: https://www.map.gov.hk/gs/api/v1.0.0/locationSearch
+    method: GET
+    request:
+      address_in: params
+      address_key: q
+    response:
+      selection: root_first
+      coordinate_fields:
+        easting: x
+        northing: y

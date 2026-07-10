@@ -1,0 +1,16 @@
+# Local-only settings. This file is gitignored — do not commit it.
+# Copy to config.local.yaml and fill in your company proxy if needed.
+#
+# Preferred (safer for public repos): set environment variables instead:
+#   ADDRESS_VALIDATION_HTTP_PROXY
+#   ADDRESS_VALIDATION_HTTPS_PROXY
+#   NO_PROXY=ase.testingaddress.com,localhost,127.0.0.1
+#
+# Or standard names:
+#   HTTP_PROXY / HTTPS_PROXY / NO_PROXY
+
+proxy:
+  # http: http://your-company-proxy.example:8080
+  # https: http://your-company-proxy.example:8080
+  # Bypass proxy for intranet endpoints:
+  no_proxy: ase.testingaddress.com,localhost,127.0.0.1
