@@ -24,6 +24,8 @@ comparison:
 
 defaults:
   timeout_seconds: 30
+  # Set false on company PCs behind SSL-inspecting proxies (same as requests verify=False).
+  verify_ssl: false
   headers:
     Accept: application/json
     Content-Type: application/json

@@ -28,6 +28,24 @@ from address_validation.rate_limit import (
 )
 from address_validation.result_parser import extract_endpoint_result
 from address_validation.logging_utils import log_info, log_warn
+import os
+
+
+def resolve_verify_ssl(config: dict[str, Any]) -> bool:
+    """
+    Company PCs behind SSL-inspecting proxies often need verify=False.
+    Priority: ADDRESS_VALIDATION_VERIFY_SSL env -> defaults.verify_ssl -> False
+    """
+    env_value = os.environ.get("ADDRESS_VALIDATION_VERIFY_SSL")
+    if env_value is not None:
+        return env_value.strip().lower() in {"1", "true", "yes", "on"}
+
+    defaults = config.get("defaults") or {}
+    if "verify_ssl" in defaults:
+        return bool(defaults["verify_ssl"])
+
+    # Default for this corporate intranet/proxy setup.
+    return False
 
 
 def build_request(endpoint: dict[str, Any], address: str) -> dict[str, Any]:
@@ -75,6 +93,7 @@ class AddressFetcher:
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self.timeout = float(config.get("defaults", {}).get("timeout_seconds", 30))
+        self.verify_ssl = resolve_verify_ssl(config)
         self.comparison_settings = get_comparison_settings(config)
         self.performance = get_performance_settings(config)
         self.proxy_settings = get_proxy_settings(config)
@@ -88,19 +107,23 @@ class AddressFetcher:
             self._limiters[name] = RateLimiter(get_endpoint_rps(endpoint, self.performance))
         return self._limiters[name]
 
-    @contextmanager
-    def session(self) -> Iterator["AddressFetcher"]:
+    def _create_client(self) -> httpx.Client:
         proxy = self.proxy_settings.as_httpx_proxy()
         limits = httpx.Limits(
             max_connections=max(self.performance.workers * 2, 10),
             max_keepalive_connections=self.performance.workers,
         )
-        with httpx.Client(
+        return httpx.Client(
             timeout=self.timeout,
             proxy=proxy,
             trust_env=True,
+            verify=self.verify_ssl,
             limits=limits,
-        ) as client:
+        )
+
+    @contextmanager
+    def session(self) -> Iterator["AddressFetcher"]:
+        with self._create_client() as client:
             self._client = client
             try:
                 yield self
@@ -129,11 +152,7 @@ class AddressFetcher:
                 client = self._client
                 owns_client = False
                 if client is None:
-                    client = httpx.Client(
-                        timeout=self.timeout,
-                        proxy=self.proxy_settings.as_httpx_proxy(),
-                        trust_env=True,
-                    )
+                    client = self._create_client()
                     owns_client = True
 
                 try:
@@ -150,6 +169,11 @@ class AddressFetcher:
                                 attempts - 1,
                                 self.performance.retry_backoff_seconds,
                                 retry_after=retry_after,
+                            )
+                            log_warn(
+                                f"Retryable HTTP {status_code} from {endpoint['name']} "
+                                f"(attempt {attempts}/{self.performance.max_retries}), "
+                                f"sleeping {delay:.1f}s"
                             )
                             time.sleep(delay)
                             continue
@@ -181,6 +205,11 @@ class AddressFetcher:
                         self.performance.retry_backoff_seconds,
                         retry_after=retry_after,
                     )
+                    log_warn(
+                        f"Retryable HTTP {status_code} from {endpoint['name']} "
+                        f"(attempt {attempts}/{self.performance.max_retries}), "
+                        f"sleeping {delay:.1f}s"
+                    )
                     time.sleep(delay)
                     continue
                 error = str(exc)
@@ -190,6 +219,11 @@ class AddressFetcher:
                     delay = compute_backoff_seconds(
                         attempts - 1,
                         self.performance.retry_backoff_seconds,
+                    )
+                    log_warn(
+                        f"Transport error from {endpoint['name']}: {exc} "
+                        f"(attempt {attempts}/{self.performance.max_retries}), "
+                        f"sleeping {delay:.1f}s"
                     )
                     time.sleep(delay)
                     continue
@@ -286,6 +320,7 @@ def run_jobs_concurrently(
         log_info(f"Proxy: {fetcher.proxy_settings.redacted_summary()}")
     else:
         log_info("Proxy: disabled (using direct connection / system env if any)")
+    log_info(f"SSL verify: {fetcher.verify_ssl} (set defaults.verify_ssl=false if company proxy hangs)")
     log_info("Submitting requests and waiting for first response...")
 
     with fetcher.session():
