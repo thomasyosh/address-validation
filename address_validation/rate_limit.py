@@ -34,9 +34,9 @@ def get_performance_settings(config: dict[str, Any]) -> PerformanceSettings:
             if retry_codes
             else set(RETRYABLE_STATUS_CODES)
         ),
-        progress_every=max(1, int(performance.get("progress_every", 100))),
-    batch_save_size=max(1, int(performance.get("batch_save_size", 1))),
-)
+        progress_every=max(1, int(performance.get("progress_every", 10))),
+        batch_save_size=max(1, int(performance.get("batch_save_size", 1))),
+    )
 
 
 def get_endpoint_rps(endpoint: dict[str, Any], defaults: PerformanceSettings) -> float:

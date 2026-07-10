@@ -36,7 +36,7 @@ performance:
   retry_backoff_seconds: 1.5
   # Common block / overload codes: 429, 403, 502, 503, 504, 408
   retry_status_codes: [429, 403, 408, 500, 502, 503, 504]
-  progress_every: 100
+  progress_every: 10
   # Commit each successful fetch promptly so crashes do not lose progress.
   batch_save_size: 1
 

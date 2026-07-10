@@ -27,6 +27,7 @@ from address_validation.rate_limit import (
     parse_retry_after,
 )
 from address_validation.result_parser import extract_endpoint_result
+from address_validation.logging_utils import log_info, log_warn
 
 
 def build_request(endpoint: dict[str, Any], address: str) -> dict[str, Any]:
@@ -238,13 +239,18 @@ def _print_progress(completed: int, total: int, started_at: float, errors: int) 
     rate = completed / elapsed
     remaining = total - completed
     eta = remaining / rate if rate > 0 else 0
-    print(
-        f"Progress: {completed}/{total} "
-        f"({completed / total * 100:.1f}%) "
-        f"errors={errors} "
-        f"{rate:.1f} req/s "
-        f"ETA {eta / 60:.1f} min"
+    log_info(
+        f"Progress {completed}/{total} ({completed / total * 100:.1f}%) "
+        f"errors={errors} rate={rate:.1f} req/s ETA={eta / 60:.1f} min"
     )
+
+
+def _should_log_request(completed: int, total: int, progress_every: int, verbose: bool) -> bool:
+    if verbose:
+        return True
+    if total <= 50:
+        return True
+    return completed == 1 or completed % progress_every == 0 or completed == total
 
 
 def run_jobs_concurrently(
@@ -253,9 +259,11 @@ def run_jobs_concurrently(
     *,
     on_result: Callable[[dict[str, Any]], None],
     workers: int | None = None,
+    verbose: bool = False,
 ) -> list[dict[str, Any]]:
     total = len(jobs)
     if total == 0:
+        log_info("No pending requests to fetch (all already saved or dataset empty).")
         return []
 
     worker_count = workers or fetcher.performance.workers
@@ -266,11 +274,19 @@ def run_jobs_concurrently(
     completed = 0
     started_at = time.perf_counter()
 
-    print(
-        f"Fetching {total} requests with {worker_count} workers "
-        f"(default {fetcher.performance.requests_per_second:g} req/s per endpoint, "
-        f"max retries {fetcher.performance.max_retries})."
+    endpoint_names = sorted({endpoint["name"] for endpoint, _ in jobs})
+    log_info(f"Starting fetch: {total} requests")
+    log_info(f"Endpoints: {', '.join(endpoint_names)}")
+    log_info(
+        f"Workers={worker_count}, "
+        f"default RPS={fetcher.performance.requests_per_second:g}/endpoint, "
+        f"max_retries={fetcher.performance.max_retries}"
     )
+    if fetcher.proxy_settings.enabled:
+        log_info(f"Proxy: {fetcher.proxy_settings.redacted_summary()}")
+    else:
+        log_info("Proxy: disabled (using direct connection / system env if any)")
+    log_info("Submitting requests and waiting for first response...")
 
     with fetcher.session():
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -279,15 +295,30 @@ def run_jobs_concurrently(
                 for endpoint, task in jobs
             }
             for future in as_completed(future_map):
+                endpoint, task = future_map[future]
                 fetched = future.result()
                 on_result(fetched)
                 results.append(fetched)
                 completed += 1
                 if fetched.get("error"):
                     errors += 1
+                    log_warn(
+                        f"{endpoint['name']} row={task.row_id} {task.address_type} "
+                        f"HTTP={fetched.get('response_code')} error={fetched['error']}"
+                    )
+                elif _should_log_request(completed, total, progress_every, verbose):
+                    preview = task.address[:60] + ("..." if len(task.address) > 60 else "")
+                    log_info(
+                        f"OK {endpoint['name']} row={task.row_id} {task.address_type} "
+                        f"HTTP={fetched.get('response_code')} "
+                        f"latency={fetched.get('latency_ms'):.0f}ms "
+                        f"address={preview!r}"
+                    )
+
                 if completed == 1 or completed % progress_every == 0 or completed == total:
                     _print_progress(completed, total, started_at, errors)
 
+    log_info(f"Fetch finished: {completed} done, {errors} errors")
     return results
 
 
@@ -315,6 +346,7 @@ class RoutineRunner:
         workers: int | None = None,
         resume_run_id: int | None = None,
         retry_errors: bool = False,
+        verbose: bool = False,
     ) -> tuple[int, list[dict[str, Any]]]:
         if resume_run_id is not None:
             run = self.database.get_run(resume_run_id)
@@ -326,6 +358,7 @@ class RoutineRunner:
                 run_id,
                 successful_only=not retry_errors,
             )
+            log_info(f"Resuming routine run {run_id}")
         else:
             run_id = self.database.create_run(
                 "routine",
@@ -336,6 +369,11 @@ class RoutineRunner:
                 comparison_criteria=self.comparison_settings.criteria,
             )
             saved_keys = set()
+            log_info(f"Created routine run {run_id}")
+
+        log_info(f"Dataset: {dataset_path}")
+        log_info(f"Endpoint: {endpoint['name']} ({endpoint['url']})")
+        log_info(f"Criteria: {self.comparison_settings.criteria}")
 
         all_jobs = [(endpoint, task) for task in iter_fetch_tasks(rows)]
         jobs = [
@@ -344,8 +382,9 @@ class RoutineRunner:
             if (task.row_id, task.address_type) not in saved_keys
         ]
         skipped = len(all_jobs) - len(jobs)
+        log_info(f"Address tasks loaded: {len(all_jobs)} (skipped saved: {skipped})")
         if skipped:
-            print(f"Resuming run {run_id}: skipping {skipped} already saved results.")
+            log_info(f"Resuming run {run_id}: skipping {skipped} already saved results.")
 
         batch: list[dict[str, Any]] = []
         summaries: list[dict[str, Any]] = []
@@ -381,12 +420,17 @@ class RoutineRunner:
                     jobs,
                     on_result=on_result,
                     workers=workers,
+                    verbose=verbose,
                 )
+            else:
+                log_info("Nothing left to fetch for this routine run.")
             flush_batch()
             self.database.mark_run_status(run_id, "completed")
+            log_info(f"Routine run {run_id} marked completed")
         except BaseException:
             flush_batch()
             self.database.mark_run_status(run_id, "interrupted")
+            log_warn(f"Routine run {run_id} marked interrupted")
             raise
 
         return run_id, summaries
@@ -416,6 +460,7 @@ class BenchmarkRunner:
         workers: int | None = None,
         resume_run_id: int | None = None,
         retry_errors: bool = False,
+        verbose: bool = False,
     ) -> tuple[int, list[dict[str, Any]]]:
         if resume_run_id is not None:
             run = self.database.get_run(resume_run_id)
@@ -427,6 +472,7 @@ class BenchmarkRunner:
                 run_id,
                 successful_only=not retry_errors,
             )
+            log_info(f"Resuming benchmark run {run_id}")
         else:
             run_id = self.database.create_run(
                 "benchmark",
@@ -436,6 +482,11 @@ class BenchmarkRunner:
                 comparison_criteria=self.comparison_settings.criteria,
             )
             saved_keys = set()
+            log_info(f"Created benchmark run {run_id}")
+
+        log_info(f"Dataset: {dataset_path}")
+        log_info(f"Endpoints: {', '.join(endpoint['name'] for endpoint in endpoints)}")
+        log_info(f"Criteria: {self.comparison_settings.criteria}")
 
         all_jobs = [
             (endpoint, task)
@@ -448,8 +499,9 @@ class BenchmarkRunner:
             if (task.row_id, task.address_type, endpoint["name"]) not in saved_keys
         ]
         skipped = len(all_jobs) - len(jobs)
+        log_info(f"Request jobs loaded: {len(all_jobs)} (skipped saved: {skipped})")
         if skipped:
-            print(f"Resuming run {run_id}: skipping {skipped} already saved results.")
+            log_info(f"Resuming run {run_id}: skipping {skipped} already saved results.")
 
         batch: list[dict[str, Any]] = []
         summaries: list[dict[str, Any]] = []
@@ -486,12 +538,17 @@ class BenchmarkRunner:
                     jobs,
                     on_result=on_result,
                     workers=workers,
+                    verbose=verbose,
                 )
+            else:
+                log_info("Nothing left to fetch for this benchmark run.")
             flush_batch()
             self.database.mark_run_status(run_id, "completed")
+            log_info(f"Benchmark run {run_id} marked completed")
         except BaseException:
             flush_batch()
             self.database.mark_run_status(run_id, "interrupted")
+            log_warn(f"Benchmark run {run_id} marked interrupted")
             raise
 
         return run_id, summaries

@@ -27,6 +27,7 @@ from address_validation.config import (
 from address_validation.database import Database
 from address_validation.dataset import get_dataset_settings, load_address_dataset
 from address_validation.fetcher import AddressFetcher, BenchmarkRunner, RoutineRunner
+from address_validation.logging_utils import log_info, log_warn
 from address_validation.proxy import get_proxy_settings
 from address_validation.summary import (
     MatchSummaryBuilder,
@@ -101,6 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="When resuming, also retry previously failed fetches",
     )
+    validate_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Log every successful fetch (not only periodic progress)",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark",
@@ -150,6 +157,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--retry-errors",
         action="store_true",
         help="When resuming, also retry previously failed fetches",
+    )
+    benchmark_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Log every successful fetch (not only periodic progress)",
     )
 
     list_parser = subparsers.add_parser("list-runs", help="List saved runs")
@@ -451,15 +464,18 @@ def handle_validate(args: argparse.Namespace, config: dict[str, Any], database: 
         rps=getattr(args, "rps", None),
     )
     settings = get_comparison_settings(config)
+    log_info("Loading dataset...")
     dataset_path, records = load_dataset_from_config(config, args.dataset)
+    log_info(f"Loaded {len(records)} Excel rows from {dataset_path}")
     endpoint = get_routine_endpoint(config)
+    log_info(f"Routine endpoint ready: {endpoint['name']}")
     fetcher = AddressFetcher(config)
     runner = RoutineRunner(config, database, fetcher)
 
     try:
         resume_run_id = resolve_resume_run_id(database, getattr(args, "resume", None), "routine")
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        log_warn(str(exc))
         return 1
 
     run_id, summaries = runner.run(
@@ -471,13 +487,15 @@ def handle_validate(args: argparse.Namespace, config: dict[str, Any], database: 
         workers=getattr(args, "workers", None),
         resume_run_id=resume_run_id,
         retry_errors=getattr(args, "retry_errors", False),
+        verbose=getattr(args, "verbose", False),
     )
     print_validation_summary(run_id, summaries, settings.criteria)
-    print(f"Saved results are durable in SQLite (run {run_id}). Use --resume to continue after a crash.")
+    log_info(f"Saved results are durable in SQLite (run {run_id}). Use --resume after a crash.")
 
 
     exit_code = 0
     if args.accuracy:
+        log_info("Computing accuracy against EASTING/NORTHING ground truth...")
         report = AccuracyAnalyzer(database, settings).analyze_run(run_id)
         print()
         print_accuracy_report(report)
@@ -512,15 +530,18 @@ def handle_benchmark(args: argparse.Namespace, config: dict[str, Any], database:
         rps=getattr(args, "rps", None),
     )
     settings = get_comparison_settings(config)
+    log_info("Loading dataset...")
     dataset_path, records = load_dataset_from_config(config, args.dataset)
+    log_info(f"Loaded {len(records)} Excel rows from {dataset_path}")
     baseline_endpoint, endpoints = get_benchmark_endpoints(config)
+    log_info(f"Benchmark endpoints ready: {', '.join(item['name'] for item in endpoints)}")
     fetcher = AddressFetcher(config)
     runner = BenchmarkRunner(config, database, fetcher)
 
     try:
         resume_run_id = resolve_resume_run_id(database, getattr(args, "resume", None), "benchmark")
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        log_warn(str(exc))
         return 1
 
     run_id, summaries = runner.run(
@@ -532,9 +553,10 @@ def handle_benchmark(args: argparse.Namespace, config: dict[str, Any], database:
         workers=getattr(args, "workers", None),
         resume_run_id=resume_run_id,
         retry_errors=getattr(args, "retry_errors", False),
+        verbose=getattr(args, "verbose", False),
     )
     print_benchmark_summary(run_id, summaries, len(endpoints), settings.criteria)
-    print(f"Saved results are durable in SQLite (run {run_id}). Use --resume to continue after a crash.")
+    log_info(f"Saved results are durable in SQLite (run {run_id}). Use --resume after a crash.")
 
     if args.report:
         report = BenchmarkAnalyzer(database, settings).analyze(run_id, baseline_endpoint)
@@ -747,7 +769,9 @@ def main(argv: list[str] | None = None) -> int:
 
     proxy_settings = get_proxy_settings(config)
     if proxy_settings.enabled:
-        print(f"Proxy: {proxy_settings.redacted_summary()}")
+        log_info(f"Proxy: {proxy_settings.redacted_summary()}")
+    else:
+        log_info("Proxy: not configured (set HTTPS_PROXY if public APIs need company proxy)")
 
     database = Database(get_database_path(config))
 
