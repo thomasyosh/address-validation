@@ -43,10 +43,14 @@ performance:
   progress_every: 10
   # Commit each successful fetch promptly so crashes do not lose progress.
   batch_save_size: 1
+  # Mix endpoint requests randomly instead of finishing one endpoint first.
+  shuffle_jobs: true
 
 routine:
   endpoint: ase_query_debug
 
+# Add/remove names freely. Missing endpoint definitions are skipped with a warning.
+# If this list is omitted, all endpoints under endpoints: are used.
 benchmark:
   baseline_endpoint: ase_query_debug
   endpoints:

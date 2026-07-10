@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -384,6 +385,13 @@ def run_jobs_concurrently(
     completed = 0
     started_at = time.perf_counter()
 
+    shuffle_jobs = bool((fetcher.config.get("performance") or {}).get("shuffle_jobs", True))
+    if shuffle_jobs:
+        random.shuffle(jobs)
+        log_info("Job order: randomized across addresses and endpoints")
+    else:
+        log_info("Job order: sequential (performance.shuffle_jobs=false)")
+
     endpoint_names = sorted({endpoint["name"] for endpoint, _ in jobs})
     log_info(f"Starting fetch: {total} requests")
     log_info(f"Endpoints: {', '.join(endpoint_names)}")
@@ -608,6 +616,10 @@ class BenchmarkRunner:
             for task in iter_fetch_tasks(rows)
             for endpoint in endpoints
         ]
+        # Shuffle here too so resume subsets stay mixed across endpoints.
+        if bool((self.config.get("performance") or {}).get("shuffle_jobs", True)):
+            random.shuffle(all_jobs)
+
         jobs = [
             (endpoint, task)
             for endpoint, task in all_jobs
