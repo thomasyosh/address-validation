@@ -3,6 +3,11 @@
 database:
   path: data/address_validation.db
 
+# File reports written after every validate/benchmark/compare run.
+reports:
+  directory: results
+  auto_write: true
+
 dataset:
   path: data/address.xlsx
   id_column: id
@@ -18,6 +23,10 @@ dataset:
 comparison:
   criteria: coordinates
   coordinate_tolerance_meters: 50
+  # Accept a match if ground truth appears in the top N ranked endpoint results.
+  top_n: 5
+  # Store enough ranked hits to re-score later with a larger --top-n.
+  candidate_store_limit: 50
   coordinate_fields:
     easting: easting
     northing: northing

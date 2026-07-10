@@ -12,8 +12,10 @@ import httpx
 
 from address_validation.comparison_rules import (
     ComparisonSettings,
+    CoordinatePair,
     build_comparison_payload,
     coordinates_to_text,
+    evaluate_candidates,
     get_comparison_settings,
 )
 from address_validation.database import Database
@@ -27,8 +29,9 @@ from address_validation.rate_limit import (
     parse_retry_after,
     should_retry_status,
 )
-from address_validation.result_parser import extract_endpoint_result, slice_response_body_for_address
+from address_validation.result_parser import extract_endpoint_candidates, slice_response_body_for_address
 from address_validation.logging_utils import log_info, log_warn
+import json
 import os
 
 
@@ -374,13 +377,38 @@ class AddressFetcher:
 
         results: list[dict[str, Any]] = []
         for task in tasks:
-            coordinates, building_csuid = extract_endpoint_result(
+            candidates = extract_endpoint_candidates(
                 response_body,
                 response_settings,
                 easting_field=easting_field,
                 northing_field=northing_field,
                 query_address=task.address,
+                limit=self.comparison_settings.candidate_store_limit,
             )
+            match = evaluate_candidates(
+                candidates,
+                criteria=self.comparison_settings.criteria,
+                expected_easting=task.easting,
+                expected_northing=task.northing,
+                expected_building_csuid=task.building_csuid,
+                tolerance_meters=self.comparison_settings.coordinate_tolerance,
+                top_n=self.comparison_settings.top_n,
+            )
+
+            if match.matches is True:
+                coordinates = CoordinatePair(match.matched_easting, match.matched_northing)
+                building_csuid = match.matched_building_csuid
+                match_rank = match.match_rank
+            elif candidates:
+                first = candidates[0]
+                coordinates = CoordinatePair(first.get("easting"), first.get("northing"))
+                building_csuid = first.get("building_csuid")
+                match_rank = None
+            else:
+                coordinates = CoordinatePair(None, None)
+                building_csuid = None
+                match_rank = None
+
             comparison_value = build_comparison_payload(
                 criteria=self.comparison_settings.criteria,
                 coordinates=coordinates,
@@ -409,6 +437,8 @@ class AddressFetcher:
                     "error": error,
                     "response_body": per_address_body,
                     "attempts": attempts,
+                    "candidates": json.dumps(candidates, ensure_ascii=False) if candidates else None,
+                    "match_rank": match_rank,
                 }
             )
         return results

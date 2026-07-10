@@ -21,6 +21,7 @@ class MatchSummaryTable:
     criteria: str
     tolerance_meters: float | None
     rows: list[SummaryRow]
+    top_n: int | None = None
 
     @property
     def total_addresses(self) -> int:
@@ -88,6 +89,7 @@ class MatchSummaryBuilder:
                 else None
             ),
             rows=rows,
+            top_n=self.settings.top_n,
         )
 
 
@@ -96,6 +98,7 @@ def match_summary_to_dict(table: MatchSummaryTable) -> dict[str, Any]:
         "run_id": table.run_id,
         "criteria": table.criteria,
         "coordinate_tolerance_meters": table.tolerance_meters,
+        "top_n": table.top_n,
         "rows": [
             {
                 "column_name": row.column_name,

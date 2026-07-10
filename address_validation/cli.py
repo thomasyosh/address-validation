@@ -11,10 +11,12 @@ from address_validation.comparator import (
     AccuracyReport,
     BenchmarkAnalyzer,
     BenchmarkReport,
+    MatchStatusComparison,
     RoutineComparator,
     RoutineComparison,
     accuracy_report_to_dict,
     benchmark_report_to_dict,
+    match_status_comparison_to_dict,
     routine_comparison_to_dict,
 )
 from address_validation.comparison_rules import get_comparison_settings
@@ -29,6 +31,7 @@ from address_validation.dataset import get_dataset_settings, load_address_datase
 from address_validation.fetcher import AddressFetcher, BenchmarkRunner, RoutineRunner
 from address_validation.logging_utils import log_info, log_warn
 from address_validation.proxy import get_proxy_settings
+from address_validation.report_writer import ReportWriter, reports_enabled
 from address_validation.summary import (
     MatchSummaryBuilder,
     MatchSummaryTable,
@@ -69,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--tolerance",
         type=float,
         help="Coordinate match radius in metres (default: 50). Common values: 50 or 100.",
+    )
+    validate_parser.add_argument(
+        "--top-n",
+        type=int,
+        dest="top_n",
+        help="Accept a match if ground truth appears in the top N endpoint results (default: 5).",
     )
     validate_parser.add_argument(
         "--compare-with-previous",
@@ -137,6 +146,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Coordinate match radius in metres (default: 50). Common values: 50 or 100.",
     )
     benchmark_parser.add_argument(
+        "--top-n",
+        type=int,
+        dest="top_n",
+        help="Accept a match if ground truth appears in the top N endpoint results (default: 5).",
+    )
+    benchmark_parser.add_argument(
         "--report",
         action="store_true",
         help="Print benchmark summary after fetching",
@@ -192,11 +207,63 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser = subparsers.add_parser("show-run", help="Show results for a specific run")
     show_parser.add_argument("run_id", type=int, help="Run ID to inspect")
 
-    compare_parser = subparsers.add_parser("compare", help="Compare routine validation runs")
-    compare_parser.add_argument("--current", type=int, help="Current run ID")
+    compare_parser = subparsers.add_parser(
+        "compare",
+        help=(
+            "Compare match status between runs "
+            "(within-tolerance now vs previous / date / month)"
+        ),
+    )
+    compare_parser.add_argument("--current", type=int, help="Current run ID (default: latest)")
     compare_parser.add_argument("--previous", type=int, help="Previous run ID")
-    compare_parser.add_argument("--with-previous", action="store_true")
+    compare_parser.add_argument(
+        "--with-previous",
+        action="store_true",
+        help="Compare current run with the immediately previous completed run",
+    )
+    compare_parser.add_argument(
+        "--with-date",
+        metavar="YYYY-MM-DD",
+        help="Compare current run with the latest completed run on that date",
+    )
+    compare_parser.add_argument(
+        "--with-month",
+        metavar="YYYY-MM",
+        help="Compare current run with the latest completed run in that month",
+    )
+    compare_parser.add_argument(
+        "--previous-month",
+        action="store_true",
+        help="Compare current run with the latest completed run in the previous calendar month",
+    )
+    compare_parser.add_argument(
+        "--type",
+        choices=["routine", "benchmark"],
+        default="routine",
+        help="Run type to resolve when using date/month selectors (default: routine)",
+    )
+    compare_parser.add_argument(
+        "--value-diff",
+        action="store_true",
+        help="Also show raw coordinate/value changes (routine runs only)",
+    )
     compare_parser.add_argument("--json", action="store_true")
+    compare_parser.add_argument(
+        "--criteria",
+        choices=["coordinates", "building_csuid"],
+        help="Override comparison.criteria from config",
+    )
+    compare_parser.add_argument(
+        "--tolerance",
+        type=float,
+        help="Coordinate match radius in metres (default: 50)",
+    )
+    compare_parser.add_argument(
+        "--top-n",
+        type=int,
+        dest="top_n",
+        help="Accept a match if ground truth appears in the top N endpoint results (default: 5).",
+    )
 
     report_parser = subparsers.add_parser("report", help="Show benchmark performance report")
     report_parser.add_argument("run_id", type=int, nargs="?", help="Benchmark run ID")
@@ -222,6 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="Coordinate match radius in metres (default: 50)",
     )
+    summary_parser.add_argument(
+        "--top-n",
+        type=int,
+        dest="top_n",
+        help="Accept a match if ground truth appears in the top N endpoint results (default: 5).",
+    )
     summary_parser.add_argument("--json", action="store_true")
     summary_parser.add_argument(
         "--csv",
@@ -244,7 +317,41 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="Coordinate match radius in metres (default: 50). Common values: 50 or 100.",
     )
+    accuracy_parser.add_argument(
+        "--top-n",
+        type=int,
+        dest="top_n",
+        help="Accept a match if ground truth appears in the top N endpoint results (default: 5).",
+    )
     accuracy_parser.add_argument("--json", action="store_true")
+
+    write_report_parser = subparsers.add_parser(
+        "write-report",
+        help="Write/refresh the results/ report folder for an existing run",
+    )
+    write_report_parser.add_argument("run_id", type=int, nargs="?", help="Run ID (default: latest)")
+    write_report_parser.add_argument(
+        "--compare-with",
+        type=int,
+        metavar="RUN_ID",
+        help="Optional previous run ID for match_diff files",
+    )
+    write_report_parser.add_argument(
+        "--criteria",
+        choices=["coordinates", "building_csuid"],
+        help="Override comparison.criteria from config",
+    )
+    write_report_parser.add_argument(
+        "--tolerance",
+        type=float,
+        help="Coordinate match radius in metres (default: 50)",
+    )
+    write_report_parser.add_argument(
+        "--top-n",
+        type=int,
+        dest="top_n",
+        help="Accept a match if ground truth appears in the top N endpoint results (default: 5).",
+    )
 
     return parser
 
@@ -264,6 +371,15 @@ def apply_tolerance_override(config: dict[str, Any], tolerance: float | None) ->
     updated = dict(config)
     updated["comparison"] = dict(config.get("comparison") or {})
     updated["comparison"]["coordinate_tolerance_meters"] = float(tolerance)
+    return updated
+
+
+def apply_top_n_override(config: dict[str, Any], top_n: int | None) -> dict[str, Any]:
+    if top_n is None:
+        return config
+    updated = dict(config)
+    updated["comparison"] = dict(config.get("comparison") or {})
+    updated["comparison"]["top_n"] = int(top_n)
     return updated
 
 
@@ -319,8 +435,10 @@ def apply_comparison_overrides(
     *,
     criteria: str | None = None,
     tolerance: float | None = None,
+    top_n: int | None = None,
 ) -> dict[str, Any]:
-    return apply_tolerance_override(apply_criteria_override(config, criteria), tolerance)
+    updated = apply_tolerance_override(apply_criteria_override(config, criteria), tolerance)
+    return apply_top_n_override(updated, top_n)
 
 
 def load_dataset_from_config(config: dict[str, Any], override_path: str | None) -> tuple[Path, list[Any]]:
@@ -398,11 +516,52 @@ def print_routine_comparison(comparison: RoutineComparison) -> None:
         print(f"  current value: {json.dumps(item.current_value, ensure_ascii=False)}")
 
 
+def print_match_status_comparison(comparison: MatchStatusComparison) -> None:
+    print(
+        f"Match-status comparison: run {comparison.current_run_id} vs "
+        f"run {comparison.previous_run_id}"
+    )
+    print(f"Criteria: {comparison.criteria}")
+    if comparison.coordinate_tolerance_meters is not None:
+        print(f"Tolerance: {comparison.coordinate_tolerance_meters:g} metres")
+    if comparison.top_n is not None:
+        print(f"Top-N ranking window: {comparison.top_n}")
+    print(
+        f"newly_matched (within tolerance now, not before): "
+        f"{comparison.newly_matched_count}"
+    )
+    print(
+        f"lost_match (within tolerance before, not now): "
+        f"{comparison.lost_match_count}"
+    )
+    print(f"other status changes: {comparison.other_changed_count}")
+
+    for item in comparison.differences:
+        print(f"\n[{item.change}] row={item.row_id} {item.address_type} {item.endpoint}")
+        print(f"  address: {item.address}")
+        print(f"  previous status: {item.previous_status}")
+        print(f"  current status: {item.current_status}")
+        if item.previous_distance_m is not None or item.current_distance_m is not None:
+            prev_d = (
+                f"{item.previous_distance_m:.2f}"
+                if item.previous_distance_m is not None
+                else "n/a"
+            )
+            curr_d = (
+                f"{item.current_distance_m:.2f}"
+                if item.current_distance_m is not None
+                else "n/a"
+            )
+            print(f"  distance_m: previous={prev_d}, current={curr_d}")
+
+
 def print_accuracy_report(report: AccuracyReport) -> None:
     print(f"Accuracy report for run {report.run_id} [{report.run_type}]")
     print(f"Criteria: {report.criteria}")
     if report.coordinate_tolerance_meters is not None:
         print(f"Tolerance: {report.coordinate_tolerance_meters:g} metres")
+    if report.top_n is not None:
+        print(f"Top-N ranking window: {report.top_n}")
     if report.endpoint:
         print(f"Endpoint: {report.endpoint}")
     if report.match_rate is not None:
@@ -423,6 +582,8 @@ def print_accuracy_report(report: AccuracyReport) -> None:
         print(f"  actual: {json.dumps(item.actual, ensure_ascii=False)}")
         if item.distance_m is not None:
             print(f"  distance_m: {item.distance_m:.2f}")
+        if item.match_rank is not None:
+            print(f"  match_rank: {item.match_rank}")
         if item.error:
             print(f"  error: {item.error}")
 
@@ -480,6 +641,8 @@ def print_match_summary(table: MatchSummaryTable) -> None:
     print(f"Criteria: {table.criteria}")
     if table.tolerance_meters is not None:
         print(f"Tolerance: {table.tolerance_meters:g} metres")
+    if getattr(table, "top_n", None) is not None:
+        print(f"Top-N ranking window: {table.top_n}")
     print("")
     print(f"{'column_name':<28} {'number':>10} {'percentage':>12}")
     print("-" * 52)
@@ -502,11 +665,91 @@ def resolve_resume_run_id(
     return int(resume_arg)
 
 
+def write_auto_report(
+    config: dict[str, Any],
+    database: Database,
+    settings: Any,
+    run_id: int,
+    *,
+    compare_with_run_id: int | None = None,
+) -> None:
+    if not reports_enabled(config):
+        return
+    written = ReportWriter(database, settings, config).write_run_report(
+        run_id,
+        compare_with_run_id=compare_with_run_id,
+        auto_compare_previous=True,
+    )
+    log_info(f"Report written to {written.directory.resolve()}")
+    print(f"Report folder: {written.directory.resolve()}")
+
+
+def resolve_compare_previous_run_id(
+    args: argparse.Namespace,
+    database: Database,
+    current_run_id: int,
+) -> int:
+    selectors = [
+        bool(args.previous),
+        bool(args.with_previous),
+        bool(args.with_date),
+        bool(args.with_month),
+        bool(args.previous_month),
+    ]
+    if sum(selectors) != 1:
+        raise ValueError(
+            "Choose exactly one of: --previous, --with-previous, "
+            "--with-date, --with-month, --previous-month."
+        )
+
+    run_type = args.type
+    if args.previous is not None:
+        return int(args.previous)
+    if args.with_previous:
+        previous = database.get_previous_run_id(current_run_id, run_type=run_type)
+        if previous is None:
+            raise ValueError(f"No previous {run_type} run exists before run {current_run_id}.")
+        return previous
+    if args.with_date:
+        previous = database.find_run_on_date(
+            args.with_date,
+            run_type=run_type,
+            before_run_id=current_run_id,
+        )
+        if previous is None:
+            raise ValueError(f"No completed {run_type} run found on {args.with_date}.")
+        return previous
+    if args.with_month:
+        try:
+            year_text, month_text = args.with_month.split("-", 1)
+            year, month = int(year_text), int(month_text)
+        except ValueError as exc:
+            raise ValueError("Month must be YYYY-MM, e.g. 2026-06") from exc
+        previous = database.find_run_in_month(
+            year,
+            month,
+            run_type=run_type,
+            before_run_id=current_run_id,
+        )
+        if previous is None:
+            raise ValueError(f"No completed {run_type} run found in {args.with_month}.")
+        return previous
+
+    previous = database.find_previous_month_run_id(current_run_id, run_type=run_type)
+    if previous is None:
+        raise ValueError(
+            f"No completed {run_type} run found in the previous calendar month "
+            f"before run {current_run_id}."
+        )
+    return previous
+
+
 def handle_validate(args: argparse.Namespace, config: dict[str, Any], database: Database) -> int:
     config = apply_comparison_overrides(
         config,
         criteria=args.criteria,
         tolerance=getattr(args, "tolerance", None),
+        top_n=getattr(args, "top_n", None),
     )
     config = apply_performance_overrides(
         config,
@@ -547,7 +790,6 @@ def handle_validate(args: argparse.Namespace, config: dict[str, Any], database: 
     print_validation_summary(run_id, summaries, settings.criteria)
     log_info(f"Saved results are durable in SQLite (run {run_id}). Use --resume after a crash.")
 
-
     exit_code = 0
     if args.accuracy:
         log_info("Computing accuracy against EASTING/NORTHING ground truth...")
@@ -557,19 +799,27 @@ def handle_validate(args: argparse.Namespace, config: dict[str, Any], database: 
         if report.not_found or report.mismatched:
             exit_code = 1
 
+    compare_with_run_id = None
     if args.compare_with_previous:
         comparator = RoutineComparator(database, settings)
         previous_run_id = database.get_previous_run_id(run_id, run_type="routine")
         if previous_run_id is None:
             print("No previous routine run available for comparison.")
-            return exit_code
+        else:
+            compare_with_run_id = previous_run_id
+            match_diff = comparator.compare_match_status(run_id, previous_run_id)
+            print()
+            print_match_status_comparison(match_diff)
+            if match_diff.has_differences:
+                exit_code = 1
 
-        comparison = comparator.compare_runs(run_id, previous_run_id)
-        print()
-        print_routine_comparison(comparison)
-        if comparison.has_differences:
-            exit_code = 1
-
+    write_auto_report(
+        config,
+        database,
+        settings,
+        run_id,
+        compare_with_run_id=compare_with_run_id,
+    )
     return exit_code
 
 
@@ -578,6 +828,7 @@ def handle_benchmark(args: argparse.Namespace, config: dict[str, Any], database:
         config,
         criteria=args.criteria,
         tolerance=getattr(args, "tolerance", None),
+        top_n=getattr(args, "top_n", None),
     )
     config = apply_performance_overrides(
         config,
@@ -632,6 +883,7 @@ def handle_benchmark(args: argparse.Namespace, config: dict[str, Any], database:
         print()
         print_match_summary(table)
 
+    write_auto_report(config, database, settings, run_id)
     return 0
 
 
@@ -707,33 +959,59 @@ def handle_show_run(args: argparse.Namespace, database: Database) -> int:
 
 
 def handle_compare(args: argparse.Namespace, config: dict[str, Any], database: Database) -> int:
+    config = apply_comparison_overrides(
+        config,
+        criteria=getattr(args, "criteria", None),
+        tolerance=getattr(args, "tolerance", None),
+        top_n=getattr(args, "top_n", None),
+    )
     settings = get_comparison_settings(config)
     comparator = RoutineComparator(database, settings)
 
-    if args.with_previous:
-        if args.current is None:
-            latest_run_id = database.get_latest_run_id(run_type="routine")
-            if latest_run_id is None:
-                print("No routine runs available.", file=sys.stderr)
-                return 1
-            args.current = latest_run_id
-        try:
-            comparison = comparator.compare_with_previous(args.current)
-        except ValueError as exc:
-            print(str(exc), file=sys.stderr)
+    current_run_id = args.current
+    if current_run_id is None:
+        current_run_id = database.get_latest_run_id(run_type=args.type)
+        if current_run_id is None:
+            print(f"No {args.type} runs available.", file=sys.stderr)
             return 1
-    else:
-        if args.current is None or args.previous is None:
-            print("Provide both --current and --previous, or use --with-previous.", file=sys.stderr)
-            return 1
-        comparison = comparator.compare_runs(args.current, args.previous)
+
+    try:
+        previous_run_id = resolve_compare_previous_run_id(args, database, current_run_id)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    match_diff = comparator.compare_match_status(current_run_id, previous_run_id)
 
     if args.json:
-        print(json.dumps(routine_comparison_to_dict(comparison), indent=2, ensure_ascii=False))
+        payload: dict[str, Any] = {
+            "match_status": match_status_comparison_to_dict(match_diff),
+        }
+        if args.value_diff:
+            current_run = database.get_run(current_run_id)
+            if current_run and current_run.run_type == "routine":
+                value_diff = comparator.compare_runs(current_run_id, previous_run_id)
+                payload["value_diff"] = routine_comparison_to_dict(value_diff)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
-        print_routine_comparison(comparison)
+        print_match_status_comparison(match_diff)
+        if args.value_diff:
+            current_run = database.get_run(current_run_id)
+            if current_run and current_run.run_type == "routine":
+                print()
+                print_routine_comparison(comparator.compare_runs(current_run_id, previous_run_id))
+            else:
+                print("\nNote: --value-diff only applies to routine validation runs.")
 
-    return 1 if comparison.has_differences else 0
+    if reports_enabled(config):
+        written = ReportWriter(database, settings, config).write_run_report(
+            current_run_id,
+            compare_with_run_id=previous_run_id,
+            auto_compare_previous=False,
+        )
+        print(f"\nReport folder: {written.directory.resolve()}")
+
+    return 1 if match_diff.has_differences else 0
 
 
 def handle_report(args: argparse.Namespace, config: dict[str, Any], database: Database) -> int:
@@ -772,6 +1050,7 @@ def handle_summary(args: argparse.Namespace, config: dict[str, Any], database: D
         config,
         criteria=args.criteria,
         tolerance=getattr(args, "tolerance", None),
+        top_n=getattr(args, "top_n", None),
     )
     settings = get_comparison_settings(config)
     run_id = args.run_id or database.get_latest_run_id()
@@ -801,6 +1080,7 @@ def handle_accuracy(args: argparse.Namespace, config: dict[str, Any], database: 
         config,
         criteria=args.criteria,
         tolerance=getattr(args, "tolerance", None),
+        top_n=getattr(args, "top_n", None),
     )
     settings = get_comparison_settings(config)
     run_id = args.run_id or database.get_latest_run_id()
@@ -815,6 +1095,36 @@ def handle_accuracy(args: argparse.Namespace, config: dict[str, Any], database: 
         print_accuracy_report(report)
 
     return 1 if report.not_found or report.mismatched else 0
+
+
+def handle_write_report(args: argparse.Namespace, config: dict[str, Any], database: Database) -> int:
+    config = apply_comparison_overrides(
+        config,
+        criteria=getattr(args, "criteria", None),
+        tolerance=getattr(args, "tolerance", None),
+        top_n=getattr(args, "top_n", None),
+    )
+    settings = get_comparison_settings(config)
+    run_id = args.run_id or database.get_latest_run_id()
+    if run_id is None:
+        print("No runs available.", file=sys.stderr)
+        return 1
+
+    try:
+        written = ReportWriter(database, settings, config).write_run_report(
+            run_id,
+            compare_with_run_id=getattr(args, "compare_with", None),
+            auto_compare_previous=getattr(args, "compare_with", None) is None,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(f"Report folder: {written.directory.resolve()}")
+    for path in written.files:
+        if path.name != "LATEST.txt":
+            print(f"  - {path.name}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -851,6 +1161,8 @@ def main(argv: list[str] | None = None) -> int:
         return handle_summary(args, config, database)
     if args.command == "accuracy":
         return handle_accuracy(args, config, database)
+    if args.command == "write-report":
+        return handle_write_report(args, config, database)
 
     parser.print_help()
     return 1

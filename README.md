@@ -26,19 +26,21 @@ Each non-empty `EADDRESS` and `CADDRESS` cell becomes one API fetch for that row
 - Default match radius: **50 metres**
 - If distance is greater than the radius → status is **`not_found`**
 - Common alternate radius: **100 metres**
+- A hit also counts if the ground truth appears in the **top N** ranked endpoint results (default **top 5**, not only rank 1)
 
 ```yaml
 comparison:
   criteria: coordinates
   coordinate_tolerance_meters: 50   # or 100
+  top_n: 5                          # or 10, 20, ...
 ```
 
 Override per command:
 
 ```powershell
-python main.py accuracy --tolerance 50
-python main.py accuracy --tolerance 100
-python main.py validate --accuracy --tolerance 100
+python main.py accuracy --tolerance 50 --top-n 5
+python main.py accuracy --tolerance 100 --top-n 10
+python main.py validate --accuracy --tolerance 100 --top-n 10
 ```
 
 **Optional (not recommended as primary standard): `building_csuid`**
@@ -58,9 +60,58 @@ python main.py validate --compare-with-previous --accuracy
 python main.py benchmark --report
 python main.py accuracy
 python main.py compare --with-previous
+python main.py compare --previous-month
+python main.py compare --with-date 2026-06-15
+python main.py compare --with-month 2026-06
 python main.py report
 python main.py show-run 3
+python main.py list-runs
 ```
+
+## Where to find reports
+
+Every `validate`, `benchmark`, and `compare` run writes a folder under `results/`:
+
+```text
+results/
+  LATEST.txt                          # path to the newest report folder
+  run_0003_20260710T084512Z_routine/
+    README.txt                        # what each file means
+    summary.txt / summary.csv         # match counts within tolerance
+    mismatches.csv                    # addresses NOT within 50m (or configured tolerance)
+    match_diff.csv / match_diff.txt   # vs previous run (see below)
+    accuracy.json
+```
+
+Open `results/LATEST.txt` to jump to the newest report, or browse `results/run_*`.
+
+Raw fetch data also stays in SQLite (`data/address_validation.db`) so you can re-compare later.
+
+## What “difference” means
+
+When your colleague asks what changed vs last run / last month / a date, the useful diff is **match status within the metre tolerance** (default **50m**):
+
+| Change | Meaning |
+|--------|---------|
+| `newly_matched` | Within 50m **this** run, but **not** in the compared run |
+| `lost_match` | Within 50m in the compared run, but **not** this run |
+
+```powershell
+# vs immediately previous completed run
+python main.py compare --with-previous
+
+# vs previous calendar month
+python main.py compare --previous-month
+
+# vs a specific date or month
+python main.py compare --with-date 2026-06-15
+python main.py compare --with-month 2026-06
+
+# vs explicit run IDs
+python main.py compare --current 12 --previous 8
+```
+
+Optional: also show raw coordinate/value changes with `--value-diff`.
 
 ## Endpoint response mapping
 
@@ -211,11 +262,11 @@ Map data                       18120       90.60%
 Switch comparison criteria in config or per command:
 
 ```powershell
-python main.py validate --criteria coordinates --tolerance 50
-python main.py validate --criteria coordinates --tolerance 100
-python main.py benchmark --report --tolerance 50
-# Optional only: ALS GeoAddress / BUILDING_CSUID
-python main.py accuracy --criteria building_csuid
+python main.py validate --criteria coordinates --tolerance 50 --top-n 5
+python main.py validate --criteria coordinates --tolerance 100 --top-n 10
+python main.py benchmark --report --tolerance 50 --top-n 5
+# Optional only: ALS GeoAddress / BUILDING_CSUID (also uses top_n ranking)
+python main.py accuracy --criteria building_csuid --top-n 5
 ```
 
 `map_gov_hk` does not return building CSUID, so use `building_csuid` only when you explicitly want ALS GeoAddress comparison.

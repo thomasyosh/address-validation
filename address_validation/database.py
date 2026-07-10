@@ -48,6 +48,8 @@ class ValidationResult:
     error: str | None
     created_at: str
     updated_at: str
+    candidates: str | None = None
+    match_rank: int | None = None
 
 
 @dataclass
@@ -56,7 +58,7 @@ class BenchmarkResult(ValidationResult):
 
 
 class Database:
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
@@ -124,6 +126,8 @@ class Database:
                     expected_building_csuid TEXT,
                     chinese_address INTEGER NOT NULL,
                     error TEXT,
+                    candidates TEXT,
+                    match_rank INTEGER,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
@@ -148,6 +152,8 @@ class Database:
                     chinese_address INTEGER NOT NULL,
                     latency_ms REAL,
                     error TEXT,
+                    candidates TEXT,
+                    match_rank INTEGER,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
@@ -168,6 +174,10 @@ class Database:
             )
             self._ensure_column(connection, "runs", "status", "TEXT NOT NULL DEFAULT 'in_progress'")
             self._ensure_column(connection, "runs", "completed_at", "TEXT")
+            self._ensure_column(connection, "validation_results", "candidates", "TEXT")
+            self._ensure_column(connection, "validation_results", "match_rank", "INTEGER")
+            self._ensure_column(connection, "benchmark_results", "candidates", "TEXT")
+            self._ensure_column(connection, "benchmark_results", "match_rank", "INTEGER")
             connection.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
     @staticmethod
@@ -261,6 +271,9 @@ class Database:
 
     def _build_payload(self, run_id: int, fields: dict[str, Any], *, benchmark: bool) -> dict[str, Any]:
         now = utc_now()
+        candidates = fields.get("candidates")
+        if isinstance(candidates, (list, dict)):
+            candidates = json.dumps(candidates, ensure_ascii=False)
         payload = {
             "run_id": run_id,
             "row_id": fields["row_id"],
@@ -277,6 +290,8 @@ class Database:
             "expected_building_csuid": fields.get("expected_building_csuid"),
             "chinese_address": int(fields.get("chinese_address", False)),
             "error": fields.get("error"),
+            "candidates": candidates,
+            "match_rank": fields.get("match_rank"),
             "created_at": now,
             "updated_at": now,
         }
@@ -417,6 +432,86 @@ class Database:
             row = connection.execute(query, params).fetchone()
         return int(row["id"]) if row else None
 
+    def find_run_on_date(
+        self,
+        date_text: str,
+        *,
+        run_type: RunType | None = None,
+        before_run_id: int | None = None,
+    ) -> int | None:
+        """Return the latest completed run whose created_at falls on YYYY-MM-DD."""
+        day = _parse_date_only(date_text)
+        day_prefix = day.strftime("%Y-%m-%d")
+        query = """
+            SELECT id FROM runs
+            WHERE COALESCE(status, 'completed') = 'completed'
+              AND substr(created_at, 1, 10) = ?
+        """
+        params: list[Any] = [day_prefix]
+        if run_type:
+            query += " AND run_type = ?"
+            params.append(run_type)
+        if before_run_id is not None:
+            query += " AND id < ?"
+            params.append(before_run_id)
+        query += " ORDER BY id DESC LIMIT 1"
+        with self.connect() as connection:
+            row = connection.execute(query, params).fetchone()
+        return int(row["id"]) if row else None
+
+    def find_run_in_month(
+        self,
+        year: int,
+        month: int,
+        *,
+        run_type: RunType | None = None,
+        before_run_id: int | None = None,
+    ) -> int | None:
+        """Return the latest completed run in the given calendar month (UTC date)."""
+        if month < 1 or month > 12:
+            raise ValueError(f"Invalid month: {month}")
+        month_prefix = f"{year:04d}-{month:02d}"
+        query = """
+            SELECT id FROM runs
+            WHERE COALESCE(status, 'completed') = 'completed'
+              AND substr(created_at, 1, 7) = ?
+        """
+        params: list[Any] = [month_prefix]
+        if run_type:
+            query += " AND run_type = ?"
+            params.append(run_type)
+        if before_run_id is not None:
+            query += " AND id < ?"
+            params.append(before_run_id)
+        query += " ORDER BY id DESC LIMIT 1"
+        with self.connect() as connection:
+            row = connection.execute(query, params).fetchone()
+        return int(row["id"]) if row else None
+
+    def find_previous_month_run_id(
+        self,
+        run_id: int,
+        *,
+        run_type: RunType | None = None,
+    ) -> int | None:
+        run = self.get_run(run_id)
+        if run is None:
+            return None
+        created = datetime.fromisoformat(run.created_at.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        year = created.year
+        month = created.month - 1
+        if month == 0:
+            month = 12
+            year -= 1
+        return self.find_run_in_month(
+            year,
+            month,
+            run_type=run_type or run.run_type,
+            before_run_id=run_id,
+        )
+
     def get_latest_run_id(self, run_type: RunType | None = None) -> int | None:
         query = "SELECT id FROM runs"
         params: list[Any] = []
@@ -497,6 +592,7 @@ class Database:
                     coordinates, building_csuid, comparison_value, comparison_hash,
                     response_code, expected_easting, expected_northing,
                     expected_building_csuid, chinese_address, error,
+                    candidates, match_rank,
                     created_at, updated_at{latency_column}
                 FROM {table_name}
                 WHERE run_id = ?
@@ -518,6 +614,13 @@ class Database:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_date_only(date_text: str) -> datetime:
+    try:
+        return datetime.strptime(date_text, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"Date must be YYYY-MM-DD, got: {date_text!r}") from exc
 
 
 def hash_text(value: str | None) -> str | None:

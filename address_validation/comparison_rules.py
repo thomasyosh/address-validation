@@ -7,6 +7,9 @@ from typing import Any, Literal
 
 ComparisonCriteria = Literal["coordinates", "building_csuid"]
 DEFAULT_COORDINATE_TOLERANCE_METERS = 50.0
+DEFAULT_TOP_N = 5
+# Store enough ranked hits so accuracy can be re-run later with a larger --top-n.
+DEFAULT_CANDIDATE_STORE_LIMIT = 50
 
 
 @dataclass
@@ -21,6 +24,8 @@ class ComparisonSettings:
     coordinate_tolerance: float
     easting_field: str
     northing_field: str
+    top_n: int = DEFAULT_TOP_N
+    candidate_store_limit: int = DEFAULT_CANDIDATE_STORE_LIMIT
 
 
 @dataclass
@@ -30,6 +35,20 @@ class CoordinateMatchResult:
     matches: bool | None
     status: str
     distance_m: float | None
+    match_rank: int | None = None
+
+
+@dataclass
+class CandidateMatchResult:
+    """Result of matching ground truth against ranked endpoint candidates."""
+
+    matches: bool | None
+    status: str
+    distance_m: float | None
+    match_rank: int | None
+    matched_easting: float | None = None
+    matched_northing: float | None = None
+    matched_building_csuid: str | None = None
 
 
 def get_comparison_settings(config: dict[str, Any]) -> ComparisonSettings:
@@ -44,12 +63,22 @@ def get_comparison_settings(config: dict[str, Any]) -> ComparisonSettings:
         "coordinate_tolerance_meters",
         comparison.get("coordinate_tolerance", DEFAULT_COORDINATE_TOLERANCE_METERS),
     )
+    top_n = int(comparison.get("top_n", DEFAULT_TOP_N))
+    if top_n < 1:
+        raise ValueError("comparison.top_n must be >= 1.")
+    store_limit = int(
+        comparison.get("candidate_store_limit", max(DEFAULT_CANDIDATE_STORE_LIMIT, top_n))
+    )
+    if store_limit < top_n:
+        store_limit = top_n
 
     return ComparisonSettings(
         criteria=criteria,
         coordinate_tolerance=float(tolerance),
         easting_field=coordinate_fields.get("easting", "easting"),
         northing_field=coordinate_fields.get("northing", "northing"),
+        top_n=top_n,
+        candidate_store_limit=store_limit,
     )
 
 
@@ -125,9 +154,84 @@ def evaluate_coordinates(
         return CoordinateMatchResult(False, "not_found", None)
 
     if distance <= tolerance_meters:
-        return CoordinateMatchResult(True, "matched", distance)
+        return CoordinateMatchResult(True, "matched", distance, match_rank=1)
 
     return CoordinateMatchResult(False, "not_found", distance)
+
+
+def evaluate_candidates(
+    candidates: list[dict[str, Any]] | None,
+    *,
+    criteria: ComparisonCriteria,
+    expected_easting: float | None,
+    expected_northing: float | None,
+    expected_building_csuid: str | None,
+    tolerance_meters: float,
+    top_n: int,
+) -> CandidateMatchResult:
+    """
+    Accept a match if ground truth appears in the top N ranked endpoint results.
+
+    For coordinates: any candidate within tolerance_meters.
+    For building_csuid: any candidate with exact CSUID.
+    """
+    ranked = list(candidates or [])[: max(1, int(top_n))]
+
+    if criteria == "building_csuid":
+        if expected_building_csuid is None or expected_building_csuid == "":
+            return CandidateMatchResult(None, "not_comparable", None, None)
+        if not ranked:
+            return CandidateMatchResult(False, "not_found", None, None)
+        for candidate in ranked:
+            actual = candidate.get("building_csuid")
+            if building_csuid_match(actual, expected_building_csuid) is True:
+                return CandidateMatchResult(
+                    True,
+                    "matched",
+                    None,
+                    int(candidate.get("rank") or 0) or None,
+                    matched_easting=_to_float(candidate.get("easting")),
+                    matched_northing=_to_float(candidate.get("northing")),
+                    matched_building_csuid=str(actual).strip() if actual else None,
+                )
+        return CandidateMatchResult(False, "not_found", None, None)
+
+    if expected_easting is None or expected_northing is None:
+        return CandidateMatchResult(None, "not_comparable", None, None)
+    if not ranked:
+        return CandidateMatchResult(False, "not_found", None, None)
+
+    best_miss_distance: float | None = None
+    for candidate in ranked:
+        pair = CoordinatePair(
+            _to_float(candidate.get("easting")),
+            _to_float(candidate.get("northing")),
+        )
+        evaluation = evaluate_coordinates(
+            pair,
+            expected_easting,
+            expected_northing,
+            tolerance_meters,
+        )
+        if evaluation.matches is True:
+            return CandidateMatchResult(
+                True,
+                "matched",
+                evaluation.distance_m,
+                int(candidate.get("rank") or 0) or None,
+                matched_easting=pair.easting,
+                matched_northing=pair.northing,
+                matched_building_csuid=(
+                    str(candidate["building_csuid"]).strip()
+                    if candidate.get("building_csuid")
+                    else None
+                ),
+            )
+        if evaluation.distance_m is not None:
+            if best_miss_distance is None or evaluation.distance_m < best_miss_distance:
+                best_miss_distance = evaluation.distance_m
+
+    return CandidateMatchResult(False, "not_found", best_miss_distance, None)
 
 
 def coordinates_match(

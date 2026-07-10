@@ -7,6 +7,7 @@ from typing import Any
 from address_validation.comparison_rules import (
     ComparisonSettings,
     building_csuid_match,
+    evaluate_candidates,
     evaluate_coordinates,
     parse_coordinate_pair,
     values_equal_for_criteria,
@@ -46,6 +47,58 @@ class RoutineComparison:
 
 
 @dataclass
+class MatchStatusDiffItem:
+    """One address whose within-tolerance match status changed between runs."""
+
+    row_id: int
+    address_type: str
+    address: str
+    endpoint: str
+    change: str
+    current_status: str | None
+    previous_status: str | None
+    current_distance_m: float | None
+    previous_distance_m: float | None
+
+
+@dataclass
+class MatchStatusComparison:
+    """
+    Diff focused on ground-truth match status (e.g. within 50m / top-N).
+
+    newly_matched: matched now, not matched previously
+    lost_match: matched previously, not matched now
+    """
+
+    current_run_id: int
+    previous_run_id: int
+    criteria: str
+    coordinate_tolerance_meters: float | None
+    differences: list[MatchStatusDiffItem]
+    top_n: int | None = None
+
+    @property
+    def newly_matched_count(self) -> int:
+        return sum(1 for item in self.differences if item.change == "newly_matched")
+
+    @property
+    def lost_match_count(self) -> int:
+        return sum(1 for item in self.differences if item.change == "lost_match")
+
+    @property
+    def other_changed_count(self) -> int:
+        return sum(
+            1
+            for item in self.differences
+            if item.change not in {"newly_matched", "lost_match"}
+        )
+
+    @property
+    def has_differences(self) -> bool:
+        return bool(self.differences)
+
+
+@dataclass
 class AccuracyItem:
     row_id: int
     address_type: str
@@ -57,6 +110,7 @@ class AccuracyItem:
     matches: bool | None
     error: str | None
     distance_m: float | None = None
+    match_rank: int | None = None
 
 
 @dataclass
@@ -73,6 +127,7 @@ class AccuracyReport:
     match_rate: float | None
     coordinate_tolerance_meters: float | None
     items: list[AccuracyItem]
+    top_n: int | None = None
 
 
 @dataclass
@@ -137,6 +192,80 @@ class RoutineComparator:
         if previous_run_id is None:
             raise ValueError(f"No previous routine run exists before run {run_id}.")
         return self.compare_runs(run_id, previous_run_id)
+
+    def compare_match_status(
+        self,
+        current_run_id: int,
+        previous_run_id: int,
+    ) -> MatchStatusComparison:
+        """Compare whether each address was within tolerance vs ground truth."""
+        analyzer = AccuracyAnalyzer(self.database, self.settings)
+        current_items = {
+            (item.row_id, item.address_type, item.endpoint): item
+            for item in analyzer.analyze_run(current_run_id).items
+        }
+        previous_items = {
+            (item.row_id, item.address_type, item.endpoint): item
+            for item in analyzer.analyze_run(previous_run_id).items
+        }
+        keys = sorted(set(current_items) | set(previous_items))
+        differences: list[MatchStatusDiffItem] = []
+
+        for key in keys:
+            current = current_items.get(key)
+            previous = previous_items.get(key)
+            current_matched = bool(current and current.matches is True)
+            previous_matched = bool(previous and previous.matches is True)
+
+            if current is None:
+                change = "missing_in_current"
+            elif previous is None:
+                change = "missing_in_previous"
+            elif current_matched and not previous_matched:
+                change = "newly_matched"
+            elif previous_matched and not current_matched:
+                change = "lost_match"
+            elif (current.status if current else None) != (previous.status if previous else None):
+                change = "status_changed"
+            else:
+                continue
+
+            sample = current or previous
+            assert sample is not None
+            differences.append(
+                MatchStatusDiffItem(
+                    row_id=sample.row_id,
+                    address_type=sample.address_type,
+                    address=sample.address,
+                    endpoint=sample.endpoint,
+                    change=change,
+                    current_status=current.status if current else None,
+                    previous_status=previous.status if previous else None,
+                    current_distance_m=current.distance_m if current else None,
+                    previous_distance_m=previous.distance_m if previous else None,
+                )
+            )
+
+        return MatchStatusComparison(
+            current_run_id=current_run_id,
+            previous_run_id=previous_run_id,
+            criteria=self.settings.criteria,
+            coordinate_tolerance_meters=(
+                self.settings.coordinate_tolerance
+                if self.settings.criteria == "coordinates"
+                else None
+            ),
+            differences=differences,
+            top_n=self.settings.top_n,
+        )
+
+    def compare_match_status_with_previous(self, run_id: int) -> MatchStatusComparison:
+        run = self.database.get_run(run_id)
+        run_type = run.run_type if run else "routine"
+        previous_run_id = self.database.get_previous_run_id(run_id, run_type=run_type)
+        if previous_run_id is None:
+            raise ValueError(f"No previous {run_type} run exists before run {run_id}.")
+        return self.compare_match_status(run_id, previous_run_id)
 
     def _compare_address(
         self,
@@ -255,10 +384,11 @@ class AccuracyAnalyzer:
                 else None
             ),
             items=items,
+            top_n=self.settings.top_n,
         )
 
     def _accuracy_from_validation(self, result: ValidationResult, endpoint: str) -> AccuracyItem:
-        matches, expected, actual, status, distance_m = self._evaluate_result(result)
+        matches, expected, actual, status, distance_m, match_rank = self._evaluate_result(result)
         return AccuracyItem(
             row_id=result.row_id,
             address_type=result.address_type,
@@ -270,10 +400,11 @@ class AccuracyAnalyzer:
             matches=matches,
             error=result.error,
             distance_m=distance_m,
+            match_rank=match_rank,
         )
 
     def _accuracy_from_benchmark(self, result: BenchmarkResult) -> AccuracyItem:
-        matches, expected, actual, status, distance_m = self._evaluate_result(result)
+        matches, expected, actual, status, distance_m, match_rank = self._evaluate_result(result)
         return AccuracyItem(
             row_id=result.row_id,
             address_type=result.address_type,
@@ -285,15 +416,54 @@ class AccuracyAnalyzer:
             matches=matches,
             error=result.error,
             distance_m=distance_m,
+            match_rank=match_rank,
         )
 
     def _evaluate_result(
         self,
         result: ValidationResult | BenchmarkResult,
-    ) -> tuple[bool | None, Any, Any, str, float | None]:
+    ) -> tuple[bool | None, Any, Any, str, float | None, int | None]:
         if result.error:
-            return False, self._expected_value(result), self._actual_value(result), "not_found", None
+            return False, self._expected_value(result), self._actual_value(result), "not_found", None, None
 
+        candidates = parse_json_text(result.candidates)
+        if isinstance(candidates, list) and candidates:
+            evaluation = evaluate_candidates(
+                candidates,
+                criteria=self.settings.criteria,
+                expected_easting=result.expected_easting,
+                expected_northing=result.expected_northing,
+                expected_building_csuid=result.expected_building_csuid,
+                tolerance_meters=self.settings.coordinate_tolerance,
+                top_n=self.settings.top_n,
+            )
+            if self.settings.criteria == "coordinates":
+                expected = {
+                    "easting": result.expected_easting,
+                    "northing": result.expected_northing,
+                }
+                actual_value = {
+                    "easting": evaluation.matched_easting,
+                    "northing": evaluation.matched_northing,
+                }
+                if evaluation.matches is not True:
+                    # Fall back to top-1 for display when nothing in top_n matched.
+                    actual_value = self._actual_value(result)
+            else:
+                expected = result.expected_building_csuid
+                actual_value = evaluation.matched_building_csuid
+                if evaluation.matches is not True:
+                    actual_value = result.building_csuid
+            return (
+                evaluation.matches,
+                expected,
+                actual_value,
+                evaluation.status,
+                evaluation.distance_m,
+                evaluation.match_rank,
+            )
+
+        # Legacy rows without stored candidates: compare the single saved value.
         if self.settings.criteria == "coordinates":
             actual = parse_coordinate_pair(
                 parse_json_text(result.coordinates),
@@ -320,6 +490,7 @@ class AccuracyAnalyzer:
                 actual_value,
                 evaluation.status,
                 evaluation.distance_m,
+                evaluation.match_rank if evaluation.matches else None,
             )
 
         expected = result.expected_building_csuid
@@ -328,7 +499,7 @@ class AccuracyAnalyzer:
         status = "matched" if matches else "mismatched"
         if matches is None:
             status = "not_comparable"
-        return matches, expected, actual_value, status, None
+        return matches, expected, actual_value, status, None, (1 if matches else None)
 
     def _expected_value(self, result: ValidationResult | BenchmarkResult) -> Any:
         if self.settings.criteria == "coordinates":
@@ -524,12 +695,41 @@ def routine_comparison_to_dict(comparison: RoutineComparison) -> dict[str, Any]:
     }
 
 
+def match_status_comparison_to_dict(comparison: MatchStatusComparison) -> dict[str, Any]:
+    return {
+        "current_run_id": comparison.current_run_id,
+        "previous_run_id": comparison.previous_run_id,
+        "criteria": comparison.criteria,
+        "coordinate_tolerance_meters": comparison.coordinate_tolerance_meters,
+        "top_n": comparison.top_n,
+        "has_differences": comparison.has_differences,
+        "newly_matched_count": comparison.newly_matched_count,
+        "lost_match_count": comparison.lost_match_count,
+        "other_changed_count": comparison.other_changed_count,
+        "differences": [
+            {
+                "row_id": item.row_id,
+                "address_type": item.address_type,
+                "address": item.address,
+                "endpoint": item.endpoint,
+                "change": item.change,
+                "current_status": item.current_status,
+                "previous_status": item.previous_status,
+                "current_distance_m": item.current_distance_m,
+                "previous_distance_m": item.previous_distance_m,
+            }
+            for item in comparison.differences
+        ],
+    }
+
+
 def accuracy_report_to_dict(report: AccuracyReport) -> dict[str, Any]:
     return {
         "run_id": report.run_id,
         "run_type": report.run_type,
         "criteria": report.criteria,
         "coordinate_tolerance_meters": report.coordinate_tolerance_meters,
+        "top_n": report.top_n,
         "endpoint": report.endpoint,
         "total": report.total,
         "matched": report.matched,
@@ -548,6 +748,7 @@ def accuracy_report_to_dict(report: AccuracyReport) -> dict[str, Any]:
                 "actual": item.actual,
                 "matches": item.matches,
                 "distance_m": item.distance_m,
+                "match_rank": item.match_rank,
                 "error": item.error,
             }
             for item in report.items

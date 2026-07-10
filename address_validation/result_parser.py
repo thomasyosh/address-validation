@@ -40,35 +40,68 @@ def select_response_item(
     *,
     query_address: str | None = None,
 ) -> Any:
+    items = select_response_items(
+        payload,
+        response_settings,
+        query_address=query_address,
+        limit=1,
+    )
+    return items[0] if items else None
+
+
+def select_response_items(
+    payload: Any,
+    response_settings: dict[str, Any],
+    *,
+    query_address: str | None = None,
+    limit: int | None = None,
+) -> list[Any]:
+    """Return ranked response items (best-first) from an endpoint payload."""
     selection = response_settings.get("selection", "path")
     if payload is None:
-        return None
+        return []
 
+    items: list[Any] = []
     if selection == "root_first":
-        return payload[0] if isinstance(payload, list) and payload else None
-
-    if selection == "first_in_path":
+        if isinstance(payload, list):
+            items = list(payload)
+        elif payload is not None:
+            items = [payload]
+    elif selection == "first_in_path":
         array_value = extract_value(payload, response_settings.get("array_path"))
-        if isinstance(array_value, list) and array_value:
-            return array_value[0]
-        return None
-
-    if selection == "first_in_data_buckets":
+        if isinstance(array_value, list):
+            items = list(array_value)
+        elif array_value is not None:
+            items = [array_value]
+    elif selection == "first_in_data_buckets":
         data = extract_value(payload, response_settings.get("data_path", "data"))
-        if not isinstance(data, dict):
-            return None
-        if query_address is not None:
-            bucket = _lookup_data_bucket(data, query_address)
-            if isinstance(bucket, list) and bucket:
-                return bucket[0]
-            return None
-        for value in data.values():
-            if isinstance(value, list) and value:
-                return value[0]
-        return None
+        if isinstance(data, dict):
+            bucket = None
+            if query_address is not None:
+                bucket = _lookup_data_bucket(data, query_address)
+            else:
+                for value in data.values():
+                    if isinstance(value, list) and value:
+                        bucket = value
+                        break
+                    if value is not None:
+                        bucket = value
+                        break
+            if isinstance(bucket, list):
+                items = list(bucket)
+            elif bucket is not None:
+                items = [bucket]
+    else:
+        coordinates_path = response_settings.get("coordinates_path")
+        value = extract_value(payload, coordinates_path) if coordinates_path else payload
+        if isinstance(value, list):
+            items = list(value)
+        elif value is not None:
+            items = [value]
 
-    coordinates_path = response_settings.get("coordinates_path")
-    return extract_value(payload, coordinates_path) if coordinates_path else payload
+    if limit is not None:
+        return items[: max(0, int(limit))]
+    return items
 
 
 def _lookup_data_bucket(data: dict[str, Any], query_address: str) -> Any:
@@ -90,31 +123,74 @@ def extract_endpoint_result(
     northing_field: str = "northing",
     query_address: str | None = None,
 ) -> tuple[CoordinatePair, str | None]:
-    payload = parse_response_json(response_body)
-    if payload is None:
-        return CoordinatePair(None, None), None
-
-    item = select_response_item(payload, response_settings, query_address=query_address)
-    if item is None:
-        return CoordinatePair(None, None), None
-
-    coordinates_source = item
-    coordinates_path = response_settings.get("item_coordinates_path")
-    if coordinates_path:
-        coordinates_source = extract_value(item, coordinates_path) or item
-
-    coordinates = parse_coordinate_pair(
-        coordinates_source,
+    candidates = extract_endpoint_candidates(
+        response_body,
+        response_settings,
         easting_field=easting_field,
         northing_field=northing_field,
+        query_address=query_address,
+        limit=1,
+    )
+    if not candidates:
+        return CoordinatePair(None, None), None
+    first = candidates[0]
+    return (
+        CoordinatePair(first.get("easting"), first.get("northing")),
+        first.get("building_csuid"),
     )
 
-    building_csuid_path = response_settings.get("building_csuid_path")
-    building_csuid = extract_value(item, building_csuid_path) if building_csuid_path else None
-    if building_csuid is not None:
-        building_csuid = str(building_csuid).strip() or None
 
-    return coordinates, building_csuid
+def extract_endpoint_candidates(
+    response_body: str | None,
+    response_settings: dict[str, Any],
+    *,
+    easting_field: str = "easting",
+    northing_field: str = "northing",
+    query_address: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Extract ranked candidates from an endpoint response.
+
+    Each candidate is:
+      {rank, easting, northing, building_csuid}
+    where rank is 1-based (1 = top result).
+    """
+    payload = parse_response_json(response_body)
+    if payload is None:
+        return []
+
+    items = select_response_items(
+        payload,
+        response_settings,
+        query_address=query_address,
+        limit=limit,
+    )
+    candidates: list[dict[str, Any]] = []
+    coordinates_path = response_settings.get("item_coordinates_path")
+    building_csuid_path = response_settings.get("building_csuid_path")
+
+    for index, item in enumerate(items, start=1):
+        coordinates_source = item
+        if coordinates_path:
+            coordinates_source = extract_value(item, coordinates_path) or item
+        coordinates = parse_coordinate_pair(
+            coordinates_source,
+            easting_field=easting_field,
+            northing_field=northing_field,
+        )
+        building_csuid = extract_value(item, building_csuid_path) if building_csuid_path else None
+        if building_csuid is not None:
+            building_csuid = str(building_csuid).strip() or None
+        candidates.append(
+            {
+                "rank": index,
+                "easting": coordinates.easting,
+                "northing": coordinates.northing,
+                "building_csuid": building_csuid,
+            }
+        )
+    return candidates
 
 
 def slice_response_body_for_address(
