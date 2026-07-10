@@ -17,14 +17,14 @@ from address_validation.comparison_rules import (
 )
 from address_validation.database import Database
 from address_validation.dataset import FetchTask, iter_fetch_tasks
-from address_validation.proxy import apply_no_proxy_env, get_proxy_settings
+from address_validation.proxy import apply_no_proxy_env, get_proxy_settings, host_bypasses_proxy
 from address_validation.rate_limit import (
-    PerformanceSettings,
     RateLimiter,
     compute_backoff_seconds,
     get_endpoint_rps,
     get_performance_settings,
     parse_retry_after,
+    should_retry_status,
 )
 from address_validation.result_parser import extract_endpoint_result
 from address_validation.logging_utils import log_info, log_warn
@@ -48,6 +48,13 @@ def resolve_verify_ssl(config: dict[str, Any]) -> bool:
     return False
 
 
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Safari/537.36"
+)
+
+
 def build_request(endpoint: dict[str, Any], address: str) -> dict[str, Any]:
     request_settings = endpoint.get("request", {})
     address_in = request_settings.get("address_in", "json")
@@ -56,13 +63,18 @@ def build_request(endpoint: dict[str, Any], address: str) -> dict[str, Any]:
     params = copy.deepcopy(endpoint.get("params") or {})
     json_body = copy.deepcopy(endpoint.get("json") or {})
     data = copy.deepcopy(endpoint.get("data") or None)
+    headers = copy.deepcopy(endpoint.get("headers") or {})
+    headers.setdefault("User-Agent", BROWSER_USER_AGENT)
+    headers.setdefault("Accept", "application/json")
 
     if address_in == "params":
         params[address_key] = address
     elif address_in == "json_array":
         json_body[address_key] = [address]
+        headers.setdefault("Content-Type", "application/json")
     elif address_in == "json":
         json_body[address_key] = address
+        headers.setdefault("Content-Type", "application/json")
     elif address_in == "data":
         if data is None:
             data = {}
@@ -74,7 +86,7 @@ def build_request(endpoint: dict[str, Any], address: str) -> dict[str, Any]:
     return {
         "method": endpoint.get("method", "GET").upper(),
         "url": endpoint["url"],
-        "headers": endpoint.get("headers"),
+        "headers": headers,
         "params": params or None,
         "json": json_body or None,
         "data": data,
@@ -98,7 +110,9 @@ class AddressFetcher:
         self.performance = get_performance_settings(config)
         self.proxy_settings = get_proxy_settings(config)
         apply_no_proxy_env(self.proxy_settings)
-        self._client: httpx.Client | None = None
+        self._proxy_client: httpx.Client | None = None
+        self._direct_client: httpx.Client | None = None
+        self._session_active = False
         self._limiters: dict[str, RateLimiter] = {}
 
     def get_limiter(self, endpoint: dict[str, Any]) -> RateLimiter:
@@ -107,8 +121,8 @@ class AddressFetcher:
             self._limiters[name] = RateLimiter(get_endpoint_rps(endpoint, self.performance))
         return self._limiters[name]
 
-    def _create_client(self) -> httpx.Client:
-        proxy = self.proxy_settings.as_httpx_proxy()
+    def _create_client(self, *, use_proxy: bool) -> httpx.Client:
+        proxy = self.proxy_settings.as_httpx_proxy() if use_proxy else None
         limits = httpx.Limits(
             max_connections=max(self.performance.workers * 2, 10),
             max_keepalive_connections=self.performance.workers,
@@ -116,19 +130,45 @@ class AddressFetcher:
         return httpx.Client(
             timeout=self.timeout,
             proxy=proxy,
-            trust_env=True,
+            # When we choose proxy/direct ourselves, do not let env proxy override it.
+            trust_env=False,
             verify=self.verify_ssl,
             limits=limits,
+            headers={"User-Agent": BROWSER_USER_AGENT},
         )
+
+    def _client_for_url(self, url: str) -> httpx.Client:
+        bypass = host_bypasses_proxy(url, self.proxy_settings.no_proxy)
+        if bypass or not self.proxy_settings.enabled:
+            if self._direct_client is None:
+                self._direct_client = self._create_client(use_proxy=False)
+            return self._direct_client
+        if self._proxy_client is None:
+            self._proxy_client = self._create_client(use_proxy=True)
+        return self._proxy_client
+
+    def describe_route(self, url: str) -> str:
+        if host_bypasses_proxy(url, self.proxy_settings.no_proxy):
+            return "direct (NO_PROXY bypass — same as Chrome intranet)"
+        if self.proxy_settings.enabled:
+            return f"via proxy ({self.proxy_settings.redacted_summary()})"
+        return "direct (no proxy configured)"
 
     @contextmanager
     def session(self) -> Iterator["AddressFetcher"]:
-        with self._create_client() as client:
-            self._client = client
-            try:
-                yield self
-            finally:
-                self._client = None
+        self._proxy_client = None
+        self._direct_client = None
+        self._session_active = True
+        try:
+            yield self
+        finally:
+            self._session_active = False
+            if self._proxy_client is not None:
+                self._proxy_client.close()
+                self._proxy_client = None
+            if self._direct_client is not None:
+                self._direct_client.close()
+                self._direct_client = None
 
     def fetch_task(self, endpoint: dict[str, Any], task: FetchTask) -> dict[str, Any]:
         request = build_request(endpoint, task.address)
@@ -149,10 +189,14 @@ class AddressFetcher:
             attempts += 1
             limiter.wait()
             try:
-                client = self._client
                 owns_client = False
-                if client is None:
-                    client = self._create_client()
+                if self._session_active:
+                    client = self._client_for_url(request["url"])
+                else:
+                    bypass = host_bypasses_proxy(request["url"], self.proxy_settings.no_proxy)
+                    client = self._create_client(
+                        use_proxy=self.proxy_settings.enabled and not bypass
+                    )
                     owns_client = True
 
                 try:
@@ -162,24 +206,37 @@ class AddressFetcher:
                     status_code = response.status_code
                     response_body = response.text
 
+                    if status_code in self.performance.no_retry_status_codes:
+                        error = f"HTTP {status_code} (no retry)"
+                        log_warn(
+                            f"HTTP {status_code} from {endpoint['name']} "
+                            f"row={task.row_id} {task.address_type} — skipping retries, continuing"
+                        )
+                        break
+
+                    if should_retry_status(status_code, self.performance, attempts):
+                        retry_after = parse_retry_after(response.headers.get("Retry-After"))
+                        delay = compute_backoff_seconds(
+                            attempts - 1,
+                            self.performance.retry_backoff_seconds,
+                            retry_after=retry_after,
+                            max_seconds=self.performance.max_retry_backoff_seconds,
+                        )
+                        log_warn(
+                            f"HTTP {status_code} from {endpoint['name']} "
+                            f"row={task.row_id} {task.address_type} "
+                            f"(retry {attempts}/{self.performance.max_retries}), "
+                            f"sleeping {delay:.1f}s"
+                        )
+                        time.sleep(delay)
+                        continue
+
                     if status_code in self.performance.retry_status_codes:
-                        if attempts <= self.performance.max_retries:
-                            retry_after = parse_retry_after(response.headers.get("Retry-After"))
-                            delay = compute_backoff_seconds(
-                                attempts - 1,
-                                self.performance.retry_backoff_seconds,
-                                retry_after=retry_after,
-                            )
-                            log_warn(
-                                f"Retryable HTTP {status_code} from {endpoint['name']} "
-                                f"(attempt {attempts}/{self.performance.max_retries}), "
-                                f"sleeping {delay:.1f}s"
-                            )
-                            time.sleep(delay)
-                            continue
-                        error = (
-                            f"HTTP {status_code} after {attempts} attempts "
-                            f"(possible rate-limit / IP block)"
+                        error = f"HTTP {status_code} after {attempts} attempts"
+                        log_warn(
+                            f"Giving up on {endpoint['name']} "
+                            f"row={task.row_id} {task.address_type} after {attempts} attempts "
+                            f"(HTTP {status_code})"
                         )
                         break
 
@@ -193,10 +250,14 @@ class AddressFetcher:
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code if exc.response is not None else status_code
                 response_body = exc.response.text if exc.response is not None else response_body
-                if (
-                    status_code in self.performance.retry_status_codes
-                    and attempts <= self.performance.max_retries
-                ):
+                if status_code in self.performance.no_retry_status_codes:
+                    error = f"HTTP {status_code} (no retry)"
+                    log_warn(
+                        f"HTTP {status_code} from {endpoint['name']} "
+                        f"row={task.row_id} {task.address_type} — skipping retries, continuing"
+                    )
+                    break
+                if should_retry_status(status_code, self.performance, attempts):
                     retry_after = None
                     if exc.response is not None:
                         retry_after = parse_retry_after(exc.response.headers.get("Retry-After"))
@@ -204,36 +265,51 @@ class AddressFetcher:
                         attempts - 1,
                         self.performance.retry_backoff_seconds,
                         retry_after=retry_after,
+                        max_seconds=self.performance.max_retry_backoff_seconds,
                     )
                     log_warn(
-                        f"Retryable HTTP {status_code} from {endpoint['name']} "
-                        f"(attempt {attempts}/{self.performance.max_retries}), "
+                        f"HTTP {status_code} from {endpoint['name']} "
+                        f"row={task.row_id} {task.address_type} "
+                        f"(retry {attempts}/{self.performance.max_retries}), "
                         f"sleeping {delay:.1f}s"
                     )
                     time.sleep(delay)
                     continue
                 error = str(exc)
+                log_warn(
+                    f"Giving up on {endpoint['name']} "
+                    f"row={task.row_id} {task.address_type}: {error}"
+                )
                 break
             except httpx.TransportError as exc:
                 if attempts <= self.performance.max_retries:
                     delay = compute_backoff_seconds(
                         attempts - 1,
                         self.performance.retry_backoff_seconds,
+                        max_seconds=self.performance.max_retry_backoff_seconds,
                     )
                     log_warn(
                         f"Transport error from {endpoint['name']}: {exc} "
-                        f"(attempt {attempts}/{self.performance.max_retries}), "
+                        f"(retry {attempts}/{self.performance.max_retries}), "
                         f"sleeping {delay:.1f}s"
                     )
                     time.sleep(delay)
                     continue
                 error = str(exc)
+                log_warn(
+                    f"Giving up on {endpoint['name']} "
+                    f"row={task.row_id} {task.address_type}: {error}"
+                )
                 break
             except httpx.HTTPError as exc:
                 error = str(exc)
                 if hasattr(exc, "response") and exc.response is not None:
                     status_code = exc.response.status_code
                     response_body = exc.response.text
+                log_warn(
+                    f"Giving up on {endpoint['name']} "
+                    f"row={task.row_id} {task.address_type}: {error}"
+                )
                 break
 
         coordinates, building_csuid = extract_endpoint_result(
@@ -311,6 +387,9 @@ def run_jobs_concurrently(
     endpoint_names = sorted({endpoint["name"] for endpoint, _ in jobs})
     log_info(f"Starting fetch: {total} requests")
     log_info(f"Endpoints: {', '.join(endpoint_names)}")
+    for endpoint_name in endpoint_names:
+        sample_url = next(endpoint["url"] for endpoint, _ in jobs if endpoint["name"] == endpoint_name)
+        log_info(f"Route {endpoint_name}: {fetcher.describe_route(sample_url)}")
     log_info(
         f"Workers={worker_count}, "
         f"default RPS={fetcher.performance.requests_per_second:g}/endpoint, "
@@ -320,7 +399,8 @@ def run_jobs_concurrently(
         log_info(f"Proxy: {fetcher.proxy_settings.redacted_summary()}")
     else:
         log_info("Proxy: disabled (using direct connection / system env if any)")
-    log_info(f"SSL verify: {fetcher.verify_ssl} (set defaults.verify_ssl=false if company proxy hangs)")
+    log_info(f"SSL verify: {fetcher.verify_ssl}")
+    log_info(f"NO_PROXY: {fetcher.proxy_settings.no_proxy}")
     log_info("Submitting requests and waiting for first response...")
 
     with fetcher.session():

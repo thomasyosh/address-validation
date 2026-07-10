@@ -7,32 +7,46 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504, 403}
+RETRYABLE_STATUS_CODES = {429, 403, 408, 500, 502, 503}
+# 504 Gateway Timeout is usually a proxy/upstream timeout; retrying often wastes time.
+NO_RETRY_STATUS_CODES = {504}
 
 
 @dataclass
 class PerformanceSettings:
     workers: int = 6
     requests_per_second: float = 4.0
-    max_retries: int = 5
-    retry_backoff_seconds: float = 1.5
+    max_retries: int = 1
+    retry_backoff_seconds: float = 1.0
+    max_retry_backoff_seconds: float = 8.0
     retry_status_codes: set[int] = field(default_factory=lambda: set(RETRYABLE_STATUS_CODES))
-    progress_every: int = 100
+    no_retry_status_codes: set[int] = field(default_factory=lambda: set(NO_RETRY_STATUS_CODES))
+    progress_every: int = 10
     batch_save_size: int = 1
 
 
 def get_performance_settings(config: dict[str, Any]) -> PerformanceSettings:
     performance = config.get("performance") or {}
     retry_codes = performance.get("retry_status_codes")
+    no_retry_codes = performance.get("no_retry_status_codes")
     return PerformanceSettings(
         workers=max(1, int(performance.get("workers", 6))),
         requests_per_second=max(0.1, float(performance.get("requests_per_second", 4.0))),
-        max_retries=max(0, int(performance.get("max_retries", 5))),
-        retry_backoff_seconds=max(0.1, float(performance.get("retry_backoff_seconds", 1.5))),
+        max_retries=max(0, int(performance.get("max_retries", 1))),
+        retry_backoff_seconds=max(0.1, float(performance.get("retry_backoff_seconds", 1.0))),
+        max_retry_backoff_seconds=max(
+            0.1,
+            float(performance.get("max_retry_backoff_seconds", 8.0)),
+        ),
         retry_status_codes=(
             set(int(code) for code in retry_codes)
-            if retry_codes
+            if retry_codes is not None
             else set(RETRYABLE_STATUS_CODES)
+        ),
+        no_retry_status_codes=(
+            set(int(code) for code in no_retry_codes)
+            if no_retry_codes is not None
+            else set(NO_RETRY_STATUS_CODES)
         ),
         progress_every=max(1, int(performance.get("progress_every", 10))),
         batch_save_size=max(1, int(performance.get("batch_save_size", 1))),
@@ -73,11 +87,23 @@ def compute_backoff_seconds(
     base_seconds: float,
     *,
     retry_after: float | None = None,
+    max_seconds: float = 8.0,
 ) -> float:
     if retry_after is not None and retry_after > 0:
-        return retry_after + random.uniform(0.0, 0.5)
-    # Exponential backoff with jitter: 1.5, 3, 6, ...
-    return (base_seconds * (2 ** max(0, attempt))) + random.uniform(0.0, 0.5)
+        return min(retry_after + random.uniform(0.0, 0.5), max_seconds)
+    delay = (base_seconds * (2 ** max(0, attempt))) + random.uniform(0.0, 0.5)
+    return min(delay, max_seconds)
+
+
+def should_retry_status(status_code: int | None, settings: PerformanceSettings, attempts: int) -> bool:
+    if status_code is None:
+        return False
+    if status_code in settings.no_retry_status_codes:
+        return False
+    if status_code not in settings.retry_status_codes:
+        return False
+    # attempts is 1-based; allow max_retries extra tries after the first.
+    return attempts <= settings.max_retries
 
 
 def parse_retry_after(header_value: str | None) -> float | None:
