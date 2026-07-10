@@ -31,8 +31,9 @@ defaults:
     Content-Type: application/json
 
 # Throughput controls for large datasets (20k-50k addresses x 3 endpoints).
+# Raise workers for intranet ASE; keep default RPS low and override per endpoint.
 performance:
-  workers: 6
+  workers: 40
   requests_per_second: 4
   max_retries: 1
   retry_backoff_seconds: 1.0
@@ -40,9 +41,9 @@ performance:
   # Retry these codes once. 504 is excluded (proxy gateway timeout).
   retry_status_codes: [429, 403, 408, 500, 502, 503]
   no_retry_status_codes: [504]
-  progress_every: 10
-  # Commit each successful fetch promptly so crashes do not lose progress.
-  batch_save_size: 1
+  progress_every: 50
+  # Batch DB writes for throughput (still frequent enough to resume after crash).
+  batch_save_size: 50
   # Mix endpoint requests randomly instead of finishing one endpoint first.
   shuffle_jobs: true
 
@@ -66,6 +67,8 @@ endpoints:
     host_header: ase.testingaddress.com
     force_direct: true
     method: POST
+    rate_limit:
+      requests_per_second: 120
     request:
       address_in: json_array
       address_key: address
@@ -99,6 +102,8 @@ endpoints:
     display_name: Map data
     url: https://www.map.gov.hk/gs/api/v1.0.0/locationSearch
     method: GET
+    rate_limit:
+      requests_per_second: 4
     request:
       address_in: params
       address_key: q

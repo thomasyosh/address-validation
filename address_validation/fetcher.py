@@ -130,8 +130,8 @@ class AddressFetcher:
     def _create_client(self, *, use_proxy: bool) -> httpx.Client:
         proxy = self.proxy_settings.as_httpx_proxy() if use_proxy else None
         limits = httpx.Limits(
-            max_connections=max(self.performance.workers * 2, 10),
-            max_keepalive_connections=self.performance.workers,
+            max_connections=max(self.performance.workers * 4, 40),
+            max_keepalive_connections=max(self.performance.workers * 2, 20),
         )
         return httpx.Client(
             timeout=self.timeout,
@@ -406,9 +406,11 @@ def run_jobs_concurrently(
     log_info(f"Endpoints: {', '.join(endpoint_names)}")
     for endpoint_name in endpoint_names:
         sample_endpoint = next(endpoint for endpoint, _ in jobs if endpoint["name"] == endpoint_name)
+        endpoint_rps = get_endpoint_rps(sample_endpoint, fetcher.performance)
         log_info(
             f"Route {endpoint_name}: "
-            f"{fetcher.describe_route(sample_endpoint['url'], force_direct=bool(sample_endpoint.get('force_direct')))}"
+            f"{fetcher.describe_route(sample_endpoint['url'], force_direct=bool(sample_endpoint.get('force_direct')))}, "
+            f"RPS={endpoint_rps:g}"
         )
     log_info(
         f"Workers={worker_count}, "

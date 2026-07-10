@@ -14,15 +14,15 @@ NO_RETRY_STATUS_CODES = {504}
 
 @dataclass
 class PerformanceSettings:
-    workers: int = 6
+    workers: int = 40
     requests_per_second: float = 4.0
     max_retries: int = 1
     retry_backoff_seconds: float = 1.0
     max_retry_backoff_seconds: float = 8.0
     retry_status_codes: set[int] = field(default_factory=lambda: set(RETRYABLE_STATUS_CODES))
     no_retry_status_codes: set[int] = field(default_factory=lambda: set(NO_RETRY_STATUS_CODES))
-    progress_every: int = 10
-    batch_save_size: int = 1
+    progress_every: int = 50
+    batch_save_size: int = 50
 
 
 def get_performance_settings(config: dict[str, Any]) -> PerformanceSettings:
@@ -30,7 +30,7 @@ def get_performance_settings(config: dict[str, Any]) -> PerformanceSettings:
     retry_codes = performance.get("retry_status_codes")
     no_retry_codes = performance.get("no_retry_status_codes")
     return PerformanceSettings(
-        workers=max(1, int(performance.get("workers", 6))),
+        workers=max(1, int(performance.get("workers", 40))),
         requests_per_second=max(0.1, float(performance.get("requests_per_second", 4.0))),
         max_retries=max(0, int(performance.get("max_retries", 1))),
         retry_backoff_seconds=max(0.1, float(performance.get("retry_backoff_seconds", 1.0))),
@@ -48,8 +48,8 @@ def get_performance_settings(config: dict[str, Any]) -> PerformanceSettings:
             if no_retry_codes is not None
             else set(NO_RETRY_STATUS_CODES)
         ),
-        progress_every=max(1, int(performance.get("progress_every", 10))),
-        batch_save_size=max(1, int(performance.get("batch_save_size", 1))),
+        progress_every=max(1, int(performance.get("progress_every", 50))),
+        batch_save_size=max(1, int(performance.get("batch_save_size", 50))),
     )
 
 

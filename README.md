@@ -81,17 +81,21 @@ Fetching is concurrent with per-endpoint rate limiting and automatic retries.
 
 ```yaml
 performance:
-  workers: 6                 # parallel threads
-  requests_per_second: 4     # default cap per endpoint
-  max_retries: 5
-  retry_backoff_seconds: 1.5
-  retry_status_codes: [429, 403, 408, 500, 502, 503, 504]
+  workers: 40                # parallel threads (ASE can use most of these)
+  requests_per_second: 4     # default cap for public APIs
+  max_retries: 1
+  retry_backoff_seconds: 1.0
+  batch_save_size: 50
+  retry_status_codes: [429, 403, 408, 500, 502, 503]
 ```
 
-Per-endpoint override (useful for stricter public APIs):
+Per-endpoint override (ASE is high; public APIs stay low):
 
 ```yaml
 endpoints:
+  - name: ase_query_debug
+    rate_limit:
+      requests_per_second: 120
   - name: als_hk
     rate_limit:
       requests_per_second: 2
@@ -100,17 +104,19 @@ endpoints:
 CLI overrides:
 
 ```powershell
-python main.py benchmark --workers 8 --rps 3 --summary
-python main.py validate --workers 4 --rps 2
+python main.py validate --workers 40 --summary
+python main.py benchmark --workers 40 --summary
+# Optional: lower public-API default without changing ASE endpoint override
+python main.py benchmark --workers 20 --rps 3 --summary
 ```
 
 Retries cover common overload / IP-block responses (`429`, `403`, `503`, etc.) with exponential backoff and `Retry-After` support.
 
-Rough scale: 50,000 addresses × 2 columns × 3 endpoints can mean hundreds of thousands of requests — keep `requests_per_second` conservative to avoid blocks.
+Intranet ASE can take high load (`rate_limit.requests_per_second: 120`). Keep ALS / Map.gov caps low to avoid blocks.
 
 ## Crash safety / resume
 
-Successful fetches are written to SQLite immediately (`batch_save_size: 1`) using WAL mode.
+Successful fetches are written to SQLite in small batches (`batch_save_size: 50`) using WAL mode.
 
 If your PC shuts down mid-run:
 
