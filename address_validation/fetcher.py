@@ -27,7 +27,7 @@ from address_validation.rate_limit import (
     parse_retry_after,
     should_retry_status,
 )
-from address_validation.result_parser import extract_endpoint_result
+from address_validation.result_parser import extract_endpoint_result, slice_response_body_for_address
 from address_validation.logging_utils import log_info, log_warn
 import os
 
@@ -56,10 +56,13 @@ BROWSER_USER_AGENT = (
 )
 
 
-def build_request(endpoint: dict[str, Any], address: str) -> dict[str, Any]:
+def build_request(endpoint: dict[str, Any], address: str | list[str]) -> dict[str, Any]:
     request_settings = endpoint.get("request", {})
     address_in = request_settings.get("address_in", "json")
     address_key = request_settings.get("address_key", "address")
+    addresses = [address] if isinstance(address, str) else list(address)
+    if not addresses:
+        raise ValueError("At least one address is required to build a request")
 
     params = copy.deepcopy(endpoint.get("params") or {})
     json_body = copy.deepcopy(endpoint.get("json") or {})
@@ -74,18 +77,24 @@ def build_request(endpoint: dict[str, Any], address: str) -> dict[str, Any]:
         headers["Host"] = host_header
 
     if address_in == "params":
-        params[address_key] = address
+        if len(addresses) != 1:
+            raise ValueError("params address_in only supports one address per request")
+        params[address_key] = addresses[0]
     elif address_in == "json_array":
-        json_body[address_key] = [address]
+        json_body[address_key] = addresses
         headers.setdefault("Content-Type", "application/json")
     elif address_in == "json":
-        json_body[address_key] = address
+        if len(addresses) != 1:
+            raise ValueError("json address_in only supports one address per request")
+        json_body[address_key] = addresses[0]
         headers.setdefault("Content-Type", "application/json")
     elif address_in == "data":
+        if len(addresses) != 1:
+            raise ValueError("data address_in only supports one address per request")
         if data is None:
             data = {}
         if isinstance(data, dict):
-            data[address_key] = address
+            data[address_key] = addresses[0]
     else:
         raise ValueError(f"Unsupported address_in value: {address_in}")
 
@@ -97,6 +106,46 @@ def build_request(endpoint: dict[str, Any], address: str) -> dict[str, Any]:
         "json": json_body or None,
         "data": data,
     }
+
+
+def get_fetch_mode(endpoint: dict[str, Any]) -> str:
+    """Return 'one' (single address) or 'batch' (array of addresses in one request)."""
+    request_settings = endpoint.get("request") or {}
+    mode = str(request_settings.get("fetch_mode", "one")).strip().lower()
+    if mode in {"batch", "array", "many"}:
+        if request_settings.get("address_in", "json") != "json_array":
+            return "one"
+        return "batch"
+    return "one"
+
+
+def get_batch_size(endpoint: dict[str, Any]) -> int:
+    request_settings = endpoint.get("request") or {}
+    if get_fetch_mode(endpoint) != "batch":
+        return 1
+    return max(1, int(request_settings.get("batch_size", 50)))
+
+
+def build_job_units(
+    jobs: list[tuple[dict[str, Any], FetchTask]],
+) -> list[tuple[dict[str, Any], list[FetchTask]]]:
+    """Group endpoint/task pairs into HTTP request units (1 task or a batch)."""
+    by_endpoint: dict[str, tuple[dict[str, Any], list[FetchTask]]] = {}
+    order: list[str] = []
+    for endpoint, task in jobs:
+        name = endpoint["name"]
+        if name not in by_endpoint:
+            by_endpoint[name] = (endpoint, [])
+            order.append(name)
+        by_endpoint[name][1].append(task)
+
+    units: list[tuple[dict[str, Any], list[FetchTask]]] = []
+    for name in order:
+        endpoint, tasks = by_endpoint[name]
+        size = get_batch_size(endpoint)
+        for index in range(0, len(tasks), size):
+            units.append((endpoint, tasks[index : index + size]))
+    return units
 
 
 def get_endpoint_coordinate_fields(endpoint: dict[str, Any], settings: ComparisonSettings) -> tuple[str, str]:
@@ -177,7 +226,15 @@ class AddressFetcher:
                 self._direct_client = None
 
     def fetch_task(self, endpoint: dict[str, Any], task: FetchTask) -> dict[str, Any]:
-        request = build_request(endpoint, task.address)
+        return self.fetch_tasks(endpoint, [task])[0]
+
+    def fetch_tasks(self, endpoint: dict[str, Any], tasks: list[FetchTask]) -> list[dict[str, Any]]:
+        if not tasks:
+            return []
+
+        addresses = [task.address for task in tasks]
+        request = build_request(endpoint, addresses)
+
         response_settings = endpoint.get("response", {})
         easting_field, northing_field = get_endpoint_coordinate_fields(
             endpoint,
@@ -190,6 +247,11 @@ class AddressFetcher:
         error: str | None = None
         latency_ms: float | None = None
         attempts = 0
+        label = (
+            f"batch={len(tasks)}"
+            if len(tasks) > 1
+            else f"row={tasks[0].row_id} {tasks[0].address_type}"
+        )
 
         while True:
             attempts += 1
@@ -220,7 +282,7 @@ class AddressFetcher:
                         error = f"HTTP {status_code} (no retry)"
                         log_warn(
                             f"HTTP {status_code} from {endpoint['name']} "
-                            f"row={task.row_id} {task.address_type} — skipping retries, continuing"
+                            f"{label} — skipping retries, continuing"
                         )
                         break
 
@@ -233,8 +295,7 @@ class AddressFetcher:
                             max_seconds=self.performance.max_retry_backoff_seconds,
                         )
                         log_warn(
-                            f"HTTP {status_code} from {endpoint['name']} "
-                            f"row={task.row_id} {task.address_type} "
+                            f"HTTP {status_code} from {endpoint['name']} {label} "
                             f"(retry {attempts}/{self.performance.max_retries}), "
                             f"sleeping {delay:.1f}s"
                         )
@@ -244,8 +305,7 @@ class AddressFetcher:
                     if status_code in self.performance.retry_status_codes:
                         error = f"HTTP {status_code} after {attempts} attempts"
                         log_warn(
-                            f"Giving up on {endpoint['name']} "
-                            f"row={task.row_id} {task.address_type} after {attempts} attempts "
+                            f"Giving up on {endpoint['name']} {label} after {attempts} attempts "
                             f"(HTTP {status_code})"
                         )
                         break
@@ -264,7 +324,7 @@ class AddressFetcher:
                     error = f"HTTP {status_code} (no retry)"
                     log_warn(
                         f"HTTP {status_code} from {endpoint['name']} "
-                        f"row={task.row_id} {task.address_type} — skipping retries, continuing"
+                        f"{label} — skipping retries, continuing"
                     )
                     break
                 if should_retry_status(status_code, self.performance, attempts):
@@ -278,18 +338,14 @@ class AddressFetcher:
                         max_seconds=self.performance.max_retry_backoff_seconds,
                     )
                     log_warn(
-                        f"HTTP {status_code} from {endpoint['name']} "
-                        f"row={task.row_id} {task.address_type} "
+                        f"HTTP {status_code} from {endpoint['name']} {label} "
                         f"(retry {attempts}/{self.performance.max_retries}), "
                         f"sleeping {delay:.1f}s"
                     )
                     time.sleep(delay)
                     continue
                 error = str(exc)
-                log_warn(
-                    f"Giving up on {endpoint['name']} "
-                    f"row={task.row_id} {task.address_type}: {error}"
-                )
+                log_warn(f"Giving up on {endpoint['name']} {label}: {error}")
                 break
             except httpx.TransportError as exc:
                 if attempts <= self.performance.max_retries:
@@ -306,52 +362,56 @@ class AddressFetcher:
                     time.sleep(delay)
                     continue
                 error = str(exc)
-                log_warn(
-                    f"Giving up on {endpoint['name']} "
-                    f"row={task.row_id} {task.address_type}: {error}"
-                )
+                log_warn(f"Giving up on {endpoint['name']} {label}: {error}")
                 break
             except httpx.HTTPError as exc:
                 error = str(exc)
                 if hasattr(exc, "response") and exc.response is not None:
                     status_code = exc.response.status_code
                     response_body = exc.response.text
-                log_warn(
-                    f"Giving up on {endpoint['name']} "
-                    f"row={task.row_id} {task.address_type}: {error}"
-                )
+                log_warn(f"Giving up on {endpoint['name']} {label}: {error}")
                 break
 
-        coordinates, building_csuid = extract_endpoint_result(
-            response_body,
-            response_settings,
-            easting_field=easting_field,
-            northing_field=northing_field,
-        )
-        comparison_value = build_comparison_payload(
-            criteria=self.comparison_settings.criteria,
-            coordinates=coordinates,
-            building_csuid=building_csuid,
-        )
-
-        return {
-            "row_id": task.row_id,
-            "address_type": task.address_type,
-            "address": task.address,
-            "endpoint": endpoint["name"],
-            "coordinates": coordinates_to_text(coordinates),
-            "building_csuid": building_csuid,
-            "comparison_value": comparison_value,
-            "response_code": status_code,
-            "expected_easting": task.easting,
-            "expected_northing": task.northing,
-            "expected_building_csuid": task.building_csuid,
-            "chinese_address": task.address_type == "CADDRESS",
-            "latency_ms": latency_ms,
-            "error": error,
-            "response_body": response_body,
-            "attempts": attempts,
-        }
+        results: list[dict[str, Any]] = []
+        for task in tasks:
+            coordinates, building_csuid = extract_endpoint_result(
+                response_body,
+                response_settings,
+                easting_field=easting_field,
+                northing_field=northing_field,
+                query_address=task.address,
+            )
+            comparison_value = build_comparison_payload(
+                criteria=self.comparison_settings.criteria,
+                coordinates=coordinates,
+                building_csuid=building_csuid,
+            )
+            per_address_body = (
+                slice_response_body_for_address(response_body, response_settings, task.address)
+                if response_body and len(tasks) > 1
+                else response_body
+            )
+            results.append(
+                {
+                    "row_id": task.row_id,
+                    "address_type": task.address_type,
+                    "address": task.address,
+                    "endpoint": endpoint["name"],
+                    "coordinates": coordinates_to_text(coordinates),
+                    "building_csuid": building_csuid,
+                    "comparison_value": comparison_value,
+                    "response_code": status_code,
+                    "expected_easting": task.easting,
+                    "expected_northing": task.northing,
+                    "expected_building_csuid": task.building_csuid,
+                    "chinese_address": task.address_type == "CADDRESS",
+                    "latency_ms": latency_ms,
+                    "error": error,
+                    "response_body": per_address_body,
+                    "attempts": attempts,
+                }
+            )
+        return results
 
 
 def _print_progress(completed: int, total: int, started_at: float, errors: int) -> None:
@@ -386,8 +446,9 @@ def run_jobs_concurrently(
         log_info("No pending requests to fetch (all already saved or dataset empty).")
         return []
 
+    units = build_job_units(jobs)
     worker_count = workers or fetcher.performance.workers
-    worker_count = max(1, min(worker_count, total))
+    worker_count = max(1, min(worker_count, len(units)))
     progress_every = fetcher.performance.progress_every
     results: list[dict[str, Any]] = []
     errors = 0
@@ -396,21 +457,24 @@ def run_jobs_concurrently(
 
     shuffle_jobs = bool((fetcher.config.get("performance") or {}).get("shuffle_jobs", True))
     if shuffle_jobs:
-        random.shuffle(jobs)
+        random.shuffle(units)
         log_info("Job order: randomized across addresses and endpoints")
     else:
         log_info("Job order: sequential (performance.shuffle_jobs=false)")
 
-    endpoint_names = sorted({endpoint["name"] for endpoint, _ in jobs})
-    log_info(f"Starting fetch: {total} requests")
+    endpoint_names = sorted({endpoint["name"] for endpoint, _ in units})
+    log_info(f"Starting fetch: {total} address tasks in {len(units)} HTTP requests")
     log_info(f"Endpoints: {', '.join(endpoint_names)}")
     for endpoint_name in endpoint_names:
-        sample_endpoint = next(endpoint for endpoint, _ in jobs if endpoint["name"] == endpoint_name)
+        sample_endpoint = next(endpoint for endpoint, _ in units if endpoint["name"] == endpoint_name)
         endpoint_rps = get_endpoint_rps(sample_endpoint, fetcher.performance)
+        mode = get_fetch_mode(sample_endpoint)
+        batch_size = get_batch_size(sample_endpoint)
+        mode_label = f"fetch_mode={mode}" + (f", batch_size={batch_size}" if mode == "batch" else "")
         log_info(
             f"Route {endpoint_name}: "
             f"{fetcher.describe_route(sample_endpoint['url'], force_direct=bool(sample_endpoint.get('force_direct')))}, "
-            f"RPS={endpoint_rps:g}"
+            f"RPS={endpoint_rps:g}, {mode_label}"
         )
     log_info(
         f"Workers={worker_count}, "
@@ -428,32 +492,37 @@ def run_jobs_concurrently(
     with fetcher.session():
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             future_map = {
-                executor.submit(fetcher.fetch_task, endpoint, task): (endpoint, task)
-                for endpoint, task in jobs
+                executor.submit(fetcher.fetch_tasks, endpoint, tasks): (endpoint, tasks)
+                for endpoint, tasks in units
             }
             for future in as_completed(future_map):
-                endpoint, task = future_map[future]
-                fetched = future.result()
-                on_result(fetched)
-                results.append(fetched)
-                completed += 1
-                if fetched.get("error"):
-                    errors += 1
-                    log_warn(
-                        f"{endpoint['name']} row={task.row_id} {task.address_type} "
-                        f"HTTP={fetched.get('response_code')} error={fetched['error']}"
-                    )
-                elif _should_log_request(completed, total, progress_every, verbose):
-                    preview = task.address[:60] + ("..." if len(task.address) > 60 else "")
-                    log_info(
-                        f"OK {endpoint['name']} row={task.row_id} {task.address_type} "
-                        f"HTTP={fetched.get('response_code')} "
-                        f"latency={fetched.get('latency_ms'):.0f}ms "
-                        f"address={preview!r}"
-                    )
+                endpoint, tasks = future_map[future]
+                fetched_rows = future.result()
+                for fetched in fetched_rows:
+                    on_result(fetched)
+                    results.append(fetched)
+                    completed += 1
+                    if fetched.get("error"):
+                        errors += 1
+                        log_warn(
+                            f"{endpoint['name']} row={fetched.get('row_id')} "
+                            f"{fetched.get('address_type')} "
+                            f"HTTP={fetched.get('response_code')} error={fetched['error']}"
+                        )
+                    elif _should_log_request(completed, total, progress_every, verbose):
+                        preview = str(fetched.get("address") or "")[:60]
+                        if len(str(fetched.get("address") or "")) > 60:
+                            preview += "..."
+                        log_info(
+                            f"OK {endpoint['name']} row={fetched.get('row_id')} "
+                            f"{fetched.get('address_type')} "
+                            f"HTTP={fetched.get('response_code')} "
+                            f"latency={fetched.get('latency_ms'):.0f}ms "
+                            f"address={preview!r}"
+                        )
 
-                if completed == 1 or completed % progress_every == 0 or completed == total:
-                    _print_progress(completed, total, started_at, errors)
+                    if completed == 1 or completed % progress_every == 0 or completed == total:
+                        _print_progress(completed, total, started_at, errors)
 
     log_info(f"Fetch finished: {completed} done, {errors} errors")
     return results

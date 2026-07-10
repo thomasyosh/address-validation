@@ -72,6 +72,9 @@ endpoints:
     request:
       address_in: json_array
       address_key: address
+      # one = one address per HTTP call; batch = many addresses in one array body
+      fetch_mode: batch
+      batch_size: 50
     response:
       selection: first_in_data_buckets
       data_path: data

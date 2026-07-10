@@ -108,6 +108,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Log every successful fetch (not only periodic progress)",
     )
+    validate_parser.add_argument(
+        "--fetch-mode",
+        choices=["one", "batch"],
+        help="ASE-style json_array endpoints: one address per request, or many in one array",
+    )
+    validate_parser.add_argument(
+        "--batch-size",
+        type=int,
+        help="Addresses per HTTP request when fetch_mode=batch (use 1 for one-by-one)",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark",
@@ -163,6 +173,16 @@ def build_parser() -> argparse.ArgumentParser:
         "-v",
         action="store_true",
         help="Log every successful fetch (not only periodic progress)",
+    )
+    benchmark_parser.add_argument(
+        "--fetch-mode",
+        choices=["one", "batch"],
+        help="ASE-style json_array endpoints: one address per request, or many in one array",
+    )
+    benchmark_parser.add_argument(
+        "--batch-size",
+        type=int,
+        help="Addresses per HTTP request when fetch_mode=batch (use 1 for one-by-one)",
     )
 
     list_parser = subparsers.add_parser("list-runs", help="List saved runs")
@@ -261,6 +281,36 @@ def apply_performance_overrides(
         updated["performance"]["workers"] = workers
     if rps is not None:
         updated["performance"]["requests_per_second"] = rps
+    return updated
+
+
+def apply_fetch_mode_overrides(
+    config: dict[str, Any],
+    *,
+    fetch_mode: str | None = None,
+    batch_size: int | None = None,
+) -> dict[str, Any]:
+    """Apply one/batch overrides to endpoints that accept json_array bodies (e.g. ASE)."""
+    if fetch_mode is None and batch_size is None:
+        return config
+
+    updated = dict(config)
+    endpoints = []
+    for endpoint in config.get("endpoints") or []:
+        endpoint_copy = dict(endpoint)
+        request = dict(endpoint.get("request") or {})
+        if request.get("address_in") == "json_array":
+            if fetch_mode is not None:
+                request["fetch_mode"] = fetch_mode
+            if batch_size is not None:
+                request["batch_size"] = max(1, int(batch_size))
+                if batch_size <= 1:
+                    request["fetch_mode"] = "one"
+                elif fetch_mode is None:
+                    request["fetch_mode"] = request.get("fetch_mode") or "batch"
+            endpoint_copy["request"] = request
+        endpoints.append(endpoint_copy)
+    updated["endpoints"] = endpoints
     return updated
 
 
@@ -463,6 +513,11 @@ def handle_validate(args: argparse.Namespace, config: dict[str, Any], database: 
         workers=getattr(args, "workers", None),
         rps=getattr(args, "rps", None),
     )
+    config = apply_fetch_mode_overrides(
+        config,
+        fetch_mode=getattr(args, "fetch_mode", None),
+        batch_size=getattr(args, "batch_size", None),
+    )
     settings = get_comparison_settings(config)
     log_info("Loading dataset...")
     dataset_path, records = load_dataset_from_config(config, args.dataset)
@@ -528,6 +583,11 @@ def handle_benchmark(args: argparse.Namespace, config: dict[str, Any], database:
         config,
         workers=getattr(args, "workers", None),
         rps=getattr(args, "rps", None),
+    )
+    config = apply_fetch_mode_overrides(
+        config,
+        fetch_mode=getattr(args, "fetch_mode", None),
+        batch_size=getattr(args, "batch_size", None),
     )
     settings = get_comparison_settings(config)
     log_info("Loading dataset...")

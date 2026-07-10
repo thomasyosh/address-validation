@@ -114,6 +114,31 @@ Retries cover common overload / IP-block responses (`429`, `403`, `503`, etc.) w
 
 Intranet ASE can take high load (`rate_limit.requests_per_second: 120`). Keep ALS / Map.gov caps low to avoid blocks.
 
+### ASE one-by-one vs batch array
+
+`ase_query_debug` accepts `{"address":["apm","ifc",...]}`. Choose how to call it:
+
+```yaml
+endpoints:
+  - name: ase_query_debug
+    request:
+      address_in: json_array
+      address_key: address
+      fetch_mode: batch   # or: one
+      batch_size: 50      # addresses per HTTP request when fetch_mode=batch
+```
+
+```powershell
+# Many addresses in one request body (faster for ASE)
+python main.py validate --fetch-mode batch --batch-size 50
+
+# One address per request
+python main.py validate --fetch-mode one
+python main.py validate --batch-size 1
+```
+
+Batch responses are split by the `data` bucket key (the queried address) so each Excel row still gets its own result.
+
 ## Crash safety / resume
 
 Successful fetches are written to SQLite in small batches (`batch_save_size: 50`) using WAL mode.

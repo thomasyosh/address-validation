@@ -34,7 +34,12 @@ def parse_response_json(response_body: str | None) -> Any:
         return None
 
 
-def select_response_item(payload: Any, response_settings: dict[str, Any]) -> Any:
+def select_response_item(
+    payload: Any,
+    response_settings: dict[str, Any],
+    *,
+    query_address: str | None = None,
+) -> Any:
     selection = response_settings.get("selection", "path")
     if payload is None:
         return None
@@ -52,6 +57,11 @@ def select_response_item(payload: Any, response_settings: dict[str, Any]) -> Any
         data = extract_value(payload, response_settings.get("data_path", "data"))
         if not isinstance(data, dict):
             return None
+        if query_address is not None:
+            bucket = _lookup_data_bucket(data, query_address)
+            if isinstance(bucket, list) and bucket:
+                return bucket[0]
+            return None
         for value in data.values():
             if isinstance(value, list) and value:
                 return value[0]
@@ -61,18 +71,30 @@ def select_response_item(payload: Any, response_settings: dict[str, Any]) -> Any
     return extract_value(payload, coordinates_path) if coordinates_path else payload
 
 
+def _lookup_data_bucket(data: dict[str, Any], query_address: str) -> Any:
+    if query_address in data:
+        return data[query_address]
+    # Case-insensitive fallback for minor normalization differences.
+    needle = query_address.casefold()
+    for key, value in data.items():
+        if str(key).casefold() == needle:
+            return value
+    return None
+
+
 def extract_endpoint_result(
     response_body: str | None,
     response_settings: dict[str, Any],
     *,
     easting_field: str = "easting",
     northing_field: str = "northing",
+    query_address: str | None = None,
 ) -> tuple[CoordinatePair, str | None]:
     payload = parse_response_json(response_body)
     if payload is None:
         return CoordinatePair(None, None), None
 
-    item = select_response_item(payload, response_settings)
+    item = select_response_item(payload, response_settings, query_address=query_address)
     if item is None:
         return CoordinatePair(None, None), None
 
@@ -93,6 +115,36 @@ def extract_endpoint_result(
         building_csuid = str(building_csuid).strip() or None
 
     return coordinates, building_csuid
+
+
+def slice_response_body_for_address(
+    response_body: str | None,
+    response_settings: dict[str, Any],
+    query_address: str,
+) -> str | None:
+    """Keep only the matching data bucket so batch responses stay small in SQLite."""
+    if not response_body:
+        return response_body
+    if response_settings.get("selection") != "first_in_data_buckets":
+        return response_body
+
+    payload = parse_response_json(response_body)
+    if not isinstance(payload, dict):
+        return response_body
+
+    data_path = response_settings.get("data_path", "data")
+    data = extract_value(payload, data_path)
+    if not isinstance(data, dict):
+        return response_body
+
+    bucket = _lookup_data_bucket(data, query_address)
+    sliced = dict(payload)
+    # Rebuild nested data path only for the top-level "data" case used by ASE.
+    if data_path == "data":
+        sliced["data"] = {query_address: bucket} if bucket is not None else {}
+    else:
+        sliced[data_path] = {query_address: bucket} if bucket is not None else {}
+    return json.dumps(sliced, ensure_ascii=False)
 
 
 def extract_coordinates(
