@@ -152,6 +152,8 @@ def concurrency_config_warnings(endpoint: dict[str, Any], global_workers: int) -
 
     return warnings
 
+
+class RateLimiter:
     """Simple thread-safe spacing for HTTP requests-per-second control."""
 
     def __init__(self, requests_per_second: float | None) -> None:
