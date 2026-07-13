@@ -13,6 +13,15 @@ NO_RETRY_STATUS_CODES = {504}
 
 
 @dataclass
+class EndpointRetrySettings:
+    max_retries: int = 1
+    retry_backoff_seconds: float = 1.0
+    max_retry_backoff_seconds: float = 8.0
+    retry_status_codes: set[int] = field(default_factory=lambda: set(RETRYABLE_STATUS_CODES))
+    no_retry_status_codes: set[int] = field(default_factory=lambda: set(NO_RETRY_STATUS_CODES))
+
+
+@dataclass
 class PerformanceSettings:
     workers: int = 40
     sequential: bool = False
@@ -124,7 +133,42 @@ def compute_backoff_seconds(
     return min(delay, max_seconds)
 
 
-def should_retry_status(status_code: int | None, settings: PerformanceSettings, attempts: int) -> bool:
+def get_endpoint_retry_settings(
+    endpoint: dict[str, Any],
+    defaults: PerformanceSettings,
+) -> EndpointRetrySettings:
+    """Per-endpoint retry rules (e.g. retry 504 on slow intranet ASE)."""
+    retry = endpoint.get("retry") or {}
+    retry_codes = retry.get("retry_status_codes")
+    no_retry_codes = retry.get("no_retry_status_codes")
+    return EndpointRetrySettings(
+        max_retries=max(0, int(retry.get("max_retries", defaults.max_retries))),
+        retry_backoff_seconds=max(
+            0.1,
+            float(retry.get("retry_backoff_seconds", defaults.retry_backoff_seconds)),
+        ),
+        max_retry_backoff_seconds=max(
+            0.1,
+            float(retry.get("max_retry_backoff_seconds", defaults.max_retry_backoff_seconds)),
+        ),
+        retry_status_codes=(
+            set(int(code) for code in retry_codes)
+            if retry_codes is not None
+            else set(defaults.retry_status_codes)
+        ),
+        no_retry_status_codes=(
+            set(int(code) for code in no_retry_codes)
+            if no_retry_codes is not None
+            else set(defaults.no_retry_status_codes)
+        ),
+    )
+
+
+def should_retry_status(
+    status_code: int | None,
+    settings: PerformanceSettings | EndpointRetrySettings,
+    attempts: int,
+) -> bool:
     if status_code is None:
         return False
     if status_code in settings.no_retry_status_codes:

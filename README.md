@@ -204,9 +204,53 @@ endpoints:
       auto_parallel_batches: false  # true only when workers > 1
 ```
 
+### `fetch_mode: one` and `max_workers`
+
+With **`fetch_mode: one`**, each HTTP call sends one address: `{"address":["apm"]}`.
+`max_workers` then controls how many of those single-address calls run **in parallel**:
+
+| ASE config | Behaviour |
+|------------|-----------|
+| `fetch_mode: one` + `max_workers: 40` | Up to **40** one-address ASE requests at once |
+| `fetch_mode: one` + `max_workers: 1` | One address at a time (safe for downsized server) |
+| `fetch_mode: batch` + `max_workers: 1` | One HTTP call at a time, each with up to `batch_size` addresses |
+
+`auto_parallel_batches` only applies when `fetch_mode: batch`.
+
+**ASE one-by-one with multi-threading (when server can handle it):**
+
+```yaml
+performance:
+  workers: 40
+  sequential: false
+
+endpoints:
+  - name: ase_query_debug
+    max_workers: 40
+    request:
+      fetch_mode: one
+
+  - name: als_hk
+    rate_limit:
+      requests_per_second: 2
+```
+
+**ASE one-by-one single-thread + public APIs multi-thread (benchmark):**
+
+```yaml
+endpoints:
+  - name: ase_query_debug
+    max_workers: 1
+    request:
+      fetch_mode: one
+
+  - name: als_hk
+    # uses performance.workers (40)
+```
+
 ```powershell
-python main.py validate --sequential
-python main.py validate --workers 1 --fetch-mode batch
+python main.py validate --fetch-mode one --workers 40
+python main.py benchmark --fetch-mode one
 ```
 
 Logs show `effective_batch` (actual array size per HTTP call) and `HTTP N/M` progress. Batch responses are split by the `data` bucket key per address.
@@ -248,6 +292,30 @@ copy config.local.example.yaml config.local.yaml
 ```
 
 Intranet ASE uses private IP `10.77.242.157` with `force_direct: true` so it never goes through the company proxy (that path commonly causes HTTP 504). Public APIs still use the proxy when configured.
+
+### Slow ASE / HTTP 504 during one-by-one fetch
+
+Global `no_retry_status_codes: [504]` skips retries for proxy timeouts. On a **slow downsized ASE**, 504 can be transient — override per endpoint:
+
+```yaml
+endpoints:
+  - name: ase_query_debug
+    max_workers: 1
+    timeout_seconds: 120
+    rate_limit:
+      requests_per_second: 2
+    retry:
+      max_retries: 3
+      retry_backoff_seconds: 2.0
+      max_retry_backoff_seconds: 30.0
+      retry_status_codes: [408, 500, 502, 503, 504]
+      no_retry_status_codes: []
+    request:
+      fetch_mode: one
+      timeout_seconds: 120
+```
+
+Resume failed rows: `python main.py validate --resume --retry-errors`
 
 ## Match summary table
 

@@ -76,15 +76,21 @@ endpoints:
     host_header: ase.testingaddress.com
     force_direct: true
     max_workers: 1
+    timeout_seconds: 120
     method: POST
     rate_limit:
-      requests_per_second: 0
+      requests_per_second: 2
+    retry:
+      max_retries: 3
+      retry_backoff_seconds: 2.0
+      max_retry_backoff_seconds: 30.0
+      retry_status_codes: [408, 500, 502, 503, 504]
+      no_retry_status_codes: []
     request:
       address_in: json_array
       address_key: address
-      fetch_mode: batch
-      batch_size: 50
-      auto_parallel_batches: false
+      fetch_mode: one
+      timeout_seconds: 120
     response:
       selection: first_in_data_buckets
       data_path: data

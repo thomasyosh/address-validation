@@ -23,9 +23,11 @@ from address_validation.database import Database
 from address_validation.dataset import FetchTask, iter_fetch_tasks
 from address_validation.proxy import apply_no_proxy_env, get_proxy_settings, host_bypasses_proxy
 from address_validation.rate_limit import (
+    EndpointRetrySettings,
     RateLimiter,
     compute_backoff_seconds,
     get_endpoint_max_workers,
+    get_endpoint_retry_settings,
     get_endpoint_rps,
     get_performance_settings,
     parse_retry_after,
@@ -243,10 +245,14 @@ class AddressFetcher:
         return self._limiters[name]
 
     def _request_timeout(self, endpoint: dict[str, Any], batch_count: int) -> float:
-        base = self.timeout
-        if batch_count <= 1:
-            return base
+        if endpoint.get("timeout_seconds") is not None:
+            base = float(endpoint["timeout_seconds"])
+        else:
+            base = self.timeout
         request_settings = endpoint.get("request") or {}
+        if batch_count <= 1:
+            single = request_settings.get("timeout_seconds")
+            return float(single) if single is not None else base
         per_address = float(request_settings.get("batch_timeout_per_address_seconds", 0.5))
         max_timeout = float(request_settings.get("batch_timeout_max_seconds", 300))
         return min(max_timeout, base + per_address * batch_count)
@@ -317,6 +323,7 @@ class AddressFetcher:
             self.comparison_settings,
         )
         limiter = self.get_limiter(endpoint)
+        retry_settings = get_endpoint_retry_settings(endpoint, self.performance)
 
         status_code: int | None = None
         response_body: str | None = None
@@ -375,7 +382,7 @@ class AddressFetcher:
                                         "addresses in response data keys"
                                     )
 
-                        if status_code in self.performance.no_retry_status_codes:
+                        if status_code in retry_settings.no_retry_status_codes:
                             error = f"HTTP {status_code} (no retry)"
                             log_warn(
                                 f"HTTP {status_code} from {endpoint['name']} "
@@ -383,23 +390,23 @@ class AddressFetcher:
                             )
                             break
 
-                        if should_retry_status(status_code, self.performance, attempts):
+                        if should_retry_status(status_code, retry_settings, attempts):
                             retry_after = parse_retry_after(response.headers.get("Retry-After"))
                             delay = compute_backoff_seconds(
                                 attempts - 1,
-                                self.performance.retry_backoff_seconds,
+                                retry_settings.retry_backoff_seconds,
                                 retry_after=retry_after,
-                                max_seconds=self.performance.max_retry_backoff_seconds,
+                                max_seconds=retry_settings.max_retry_backoff_seconds,
                             )
                             log_warn(
                                 f"HTTP {status_code} from {endpoint['name']} {label} "
-                                f"(retry {attempts}/{self.performance.max_retries}), "
+                                f"(retry {attempts}/{retry_settings.max_retries}), "
                                 f"sleeping {delay:.1f}s"
                             )
                             time.sleep(delay)
                             continue
 
-                        if status_code in self.performance.retry_status_codes:
+                        if status_code in retry_settings.retry_status_codes:
                             error = f"HTTP {status_code} after {attempts} attempts"
                             log_warn(
                                 f"Giving up on {endpoint['name']} {label} after {attempts} attempts "
@@ -417,26 +424,26 @@ class AddressFetcher:
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code if exc.response is not None else status_code
                 response_body = exc.response.text if exc.response is not None else response_body
-                if status_code in self.performance.no_retry_status_codes:
+                if status_code in retry_settings.no_retry_status_codes:
                     error = f"HTTP {status_code} (no retry)"
                     log_warn(
                         f"HTTP {status_code} from {endpoint['name']} "
                         f"{label} — skipping retries, continuing"
                     )
                     break
-                if should_retry_status(status_code, self.performance, attempts):
+                if should_retry_status(status_code, retry_settings, attempts):
                     retry_after = None
                     if exc.response is not None:
                         retry_after = parse_retry_after(exc.response.headers.get("Retry-After"))
                     delay = compute_backoff_seconds(
                         attempts - 1,
-                        self.performance.retry_backoff_seconds,
+                        retry_settings.retry_backoff_seconds,
                         retry_after=retry_after,
-                        max_seconds=self.performance.max_retry_backoff_seconds,
+                        max_seconds=retry_settings.max_retry_backoff_seconds,
                     )
                     log_warn(
                         f"HTTP {status_code} from {endpoint['name']} {label} "
-                        f"(retry {attempts}/{self.performance.max_retries}), "
+                        f"(retry {attempts}/{retry_settings.max_retries}), "
                         f"sleeping {delay:.1f}s"
                     )
                     time.sleep(delay)
@@ -445,15 +452,15 @@ class AddressFetcher:
                 log_warn(f"Giving up on {endpoint['name']} {label}: {error}")
                 break
             except httpx.TransportError as exc:
-                if attempts <= self.performance.max_retries:
+                if attempts <= retry_settings.max_retries:
                     delay = compute_backoff_seconds(
                         attempts - 1,
-                        self.performance.retry_backoff_seconds,
-                        max_seconds=self.performance.max_retry_backoff_seconds,
+                        retry_settings.retry_backoff_seconds,
+                        max_seconds=retry_settings.max_retry_backoff_seconds,
                     )
                     log_warn(
                         f"Transport error from {endpoint['name']}: {exc} "
-                        f"(retry {attempts}/{self.performance.max_retries}), "
+                        f"(retry {attempts}/{retry_settings.max_retries}), "
                         f"sleeping {delay:.1f}s"
                     )
                     time.sleep(delay)
