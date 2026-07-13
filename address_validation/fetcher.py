@@ -31,6 +31,7 @@ from address_validation.rate_limit import (
     get_endpoint_rps,
     get_performance_settings,
     get_request_concurrency,
+    concurrency_config_warnings,
     parse_retry_after,
     should_retry_status,
 )
@@ -644,6 +645,8 @@ def run_jobs_concurrently(
             f"{fetcher.describe_route(sample_endpoint['url'], force_direct=bool(sample_endpoint.get('force_direct')))}, "
             f"RPS={rps_label}, max_workers={endpoint_max_workers}, {mode_label}"
         )
+        for warning in concurrency_config_warnings(sample_endpoint, worker_count):
+            log_warn(warning)
     concurrency_label = "sequential (1 client thread)" if fetcher.performance.sequential else "multi-threaded client"
     log_info(
         f"Workers={worker_count} ({concurrency_label}), "

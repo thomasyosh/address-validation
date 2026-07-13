@@ -117,7 +117,41 @@ def get_endpoint_max_workers(endpoint: dict[str, Any], global_workers: int) -> i
     return max(1, global_workers)
 
 
-class RateLimiter:
+def concurrency_config_warnings(endpoint: dict[str, Any], global_workers: int) -> list[str]:
+    """Warn when YAML knobs look set for parallel load but will not apply."""
+    warnings: list[str] = []
+    name = endpoint.get("name", "endpoint")
+    request = endpoint.get("request") or {}
+    concurrency = get_request_concurrency(endpoint)
+    max_workers = endpoint.get("max_workers")
+    explicit_concurrency = request.get("concurrency")
+
+    if concurrency == "single-thread":
+        if max_workers is not None and int(max_workers) > 1:
+            warnings.append(
+                f"{name}: max_workers={max_workers} has no effect while "
+                "request.concurrency is single-thread (only 1 HTTP call in flight). "
+                "Set concurrency: multi-thread to use parallel requests."
+            )
+        if explicit_concurrency is None and max_workers is None:
+            pass
+    elif max_workers is not None and int(max_workers) < global_workers:
+        warnings.append(
+            f"{name}: max_workers={max_workers} caps parallel HTTP calls "
+            f"(global pool is {global_workers})."
+        )
+
+    rate_limit = endpoint.get("rate_limit") or {}
+    if "requests_per_second" in rate_limit:
+        rps = float(rate_limit["requests_per_second"])
+        if 0 < rps <= 5 and concurrency == "multi-thread":
+            warnings.append(
+                f"{name}: rate_limit.requests_per_second={rps:g} throttles how fast "
+                "new HTTP calls start (raise it or set 0 for unlimited)."
+            )
+
+    return warnings
+
     """Simple thread-safe spacing for HTTP requests-per-second control."""
 
     def __init__(self, requests_per_second: float | None) -> None:
