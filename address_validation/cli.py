@@ -652,10 +652,10 @@ def print_match_summary(table: MatchSummaryTable) -> None:
     if getattr(table, "top_n", None) is not None:
         print(f"Top-N ranking window: {table.top_n}")
     print("")
-    print(f"{'column_name':<28} {'number':>10} {'percentage':>12}")
-    print("-" * 52)
+    print(f"{'column_name':<42} {'number':>10} {'percentage':>12}")
+    print("-" * 66)
     for row in table.rows:
-        print(f"{row.column_name:<28} {row.number:>10} {row.percentage:>11.2f}%")
+        print(f"{row.column_name:<42} {row.number:>10} {row.percentage:>11.2f}%")
 
 
 def resolve_resume_run_id(

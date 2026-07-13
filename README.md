@@ -232,17 +232,22 @@ python main.py summary --csv results/summary.csv
 Example output:
 
 ```text
-column_name                   number   percentage
-----------------------------------------------------
-Number of Address              20000      100.00%
-Ase testing query_debug        16126       80.63%
-ALS                            15120       75.60%
-Map data                       18120       90.60%
+column_name                                        number   percentage
+----------------------------------------------------------------------
+Number of Address                                   20000      100.00%
+Number of English Address                           10000       50.00%
+Number of Chinese Address                           10000       50.00%
+Ase testing query_debug — English                    8500       85.00%
+Ase testing query_debug — Chinese                    7626       76.26%
+ALS — English                                        7560       75.60%
+ALS — Chinese                                        7560       75.60%
+Map data — English                                   9060       90.60%
+Map data — Chinese                                   9060       90.60%
 ```
 
 - **Number of Address** = total address fetches (`EADDRESS` + `CADDRESS`)
-- Endpoint **number** = addresses matched within the metre tolerance
-- **percentage** = matched / Number of Address
+- **Number of English/Chinese Address** = count for that column type
+- Endpoint rows are split by language; **percentage** = matched / that language's total
 
 | Name | URL | Method | Notes |
 |------|-----|--------|-------|

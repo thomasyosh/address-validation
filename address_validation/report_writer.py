@@ -207,10 +207,10 @@ class ReportWriter:
         if run.endpoint_name:
             lines.append(f"Endpoint: {run.endpoint_name}")
         lines.append("")
-        lines.append(f"{'column_name':<28} {'number':>10} {'percentage':>12}")
-        lines.append("-" * 52)
+        lines.append(f"{'column_name':<42} {'number':>10} {'percentage':>12}")
+        lines.append("-" * 66)
         for row in summary.rows:
-            lines.append(f"{row.column_name:<28} {row.number:>10} {row.percentage:>11.2f}%")
+            lines.append(f"{row.column_name:<42} {row.number:>10} {row.percentage:>11.2f}%")
         lines.append("")
         if accuracy.match_rate is not None:
             lines.append(
