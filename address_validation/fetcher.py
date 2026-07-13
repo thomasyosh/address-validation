@@ -114,7 +114,10 @@ def build_request(endpoint: dict[str, Any], address: str | list[str]) -> dict[st
 def get_fetch_mode(endpoint: dict[str, Any]) -> str:
     """Return 'one' (single address) or 'batch' (array of addresses in one request)."""
     request_settings = endpoint.get("request") or {}
-    mode = str(request_settings.get("fetch_mode", "one")).strip().lower()
+    raw_mode = request_settings.get("fetch_mode", "one")
+    if isinstance(raw_mode, bool):
+        return "batch" if raw_mode else "one"
+    mode = str(raw_mode).strip().lower()
     if mode in {"batch", "array", "many"}:
         if request_settings.get("address_in", "json") != "json_array":
             return "one"
@@ -123,14 +126,53 @@ def get_fetch_mode(endpoint: dict[str, Any]) -> str:
 
 
 def get_batch_size(endpoint: dict[str, Any]) -> int:
+    """Configured maximum addresses per HTTP request when fetch_mode=batch."""
     request_settings = endpoint.get("request") or {}
     if get_fetch_mode(endpoint) != "batch":
         return 1
     return max(1, int(request_settings.get("batch_size", 50)))
 
 
+def get_effective_batch_size(
+    endpoint: dict[str, Any],
+    task_count: int,
+    *,
+    workers: int = 1,
+) -> int:
+    """
+    Addresses per HTTP request after applying parallelism tuning.
+
+    Large batch_size reduces HTTP count but also reduces parallel in-flight
+    requests (worker_count is capped by unit count). When
+    auto_parallel_batches is true (default), batch size is reduced so enough
+    HTTP requests exist to keep workers busy.
+    """
+    configured = get_batch_size(endpoint)
+    if get_fetch_mode(endpoint) != "batch" or task_count <= 1:
+        return 1
+
+    request_settings = endpoint.get("request") or {}
+    auto_parallel = request_settings.get("auto_parallel_batches", True)
+    if not auto_parallel:
+        return min(configured, task_count)
+
+    target_units = max(1, workers)
+    if task_count <= configured:
+        # Small runs: prefer one address per request so short datasets still
+        # use multiple workers (unless user disabled auto_parallel_batches).
+        if task_count <= target_units:
+            return 1
+        parallel_size = max(1, (task_count + target_units - 1) // target_units)
+        return min(configured, parallel_size)
+
+    parallel_size = max(1, (task_count + target_units - 1) // target_units)
+    return min(configured, parallel_size)
+
+
 def build_job_units(
     jobs: list[tuple[dict[str, Any], FetchTask]],
+    *,
+    workers: int = 1,
 ) -> list[tuple[dict[str, Any], list[FetchTask]]]:
     """Group endpoint/task pairs into HTTP request units (1 task or a batch)."""
     by_endpoint: dict[str, tuple[dict[str, Any], list[FetchTask]]] = {}
@@ -145,7 +187,7 @@ def build_job_units(
     units: list[tuple[dict[str, Any], list[FetchTask]]] = []
     for name in order:
         endpoint, tasks = by_endpoint[name]
-        size = get_batch_size(endpoint)
+        size = get_effective_batch_size(endpoint, len(tasks), workers=workers)
         for index in range(0, len(tasks), size):
             units.append((endpoint, tasks[index : index + size]))
     return units
@@ -178,6 +220,15 @@ class AddressFetcher:
         if name not in self._limiters:
             self._limiters[name] = RateLimiter(get_endpoint_rps(endpoint, self.performance))
         return self._limiters[name]
+
+    def _request_timeout(self, endpoint: dict[str, Any], batch_count: int) -> float:
+        base = self.timeout
+        if batch_count <= 1:
+            return base
+        request_settings = endpoint.get("request") or {}
+        per_address = float(request_settings.get("batch_timeout_per_address_seconds", 0.5))
+        max_timeout = float(request_settings.get("batch_timeout_max_seconds", 300))
+        return min(max_timeout, base + per_address * batch_count)
 
     def _create_client(self, *, use_proxy: bool) -> httpx.Client:
         proxy = self.proxy_settings.as_httpx_proxy() if use_proxy else None
@@ -237,6 +288,7 @@ class AddressFetcher:
 
         addresses = [task.address for task in tasks]
         request = build_request(endpoint, addresses)
+        request_timeout = self._request_timeout(endpoint, len(tasks))
 
         response_settings = endpoint.get("response", {})
         easting_field, northing_field = get_endpoint_coordinate_fields(
@@ -276,10 +328,30 @@ class AddressFetcher:
 
                 try:
                     started = time.perf_counter()
-                    response = client.request(**request)
+                    response = client.request(**request, timeout=request_timeout)
                     latency_ms = (time.perf_counter() - started) * 1000
                     status_code = response.status_code
                     response_body = response.text
+
+                    if (
+                        len(tasks) > 1
+                        and status_code is not None
+                        and 200 <= status_code < 300
+                        and response_body
+                    ):
+                        from address_validation.result_parser import _lookup_data_bucket, parse_response_json
+
+                        payload = parse_response_json(response_body)
+                        data = payload.get("data") if isinstance(payload, dict) else None
+                        if isinstance(data, dict):
+                            matched = sum(
+                                1 for task in tasks if _lookup_data_bucket(data, task.address) is not None
+                            )
+                            if matched < len(tasks):
+                                log_warn(
+                                    f"{endpoint['name']} batch matched {matched}/{len(tasks)} "
+                                    "addresses in response data keys"
+                                )
 
                     if status_code in self.performance.no_retry_status_codes:
                         error = f"HTTP {status_code} (no retry)"
@@ -444,14 +516,26 @@ class AddressFetcher:
         return results
 
 
-def _print_progress(completed: int, total: int, started_at: float, errors: int) -> None:
+def _print_progress(
+    completed_addresses: int,
+    total_addresses: int,
+    *,
+    completed_http: int,
+    total_http: int,
+    started_at: float,
+    errors: int,
+) -> None:
     elapsed = max(time.perf_counter() - started_at, 0.001)
-    rate = completed / elapsed
-    remaining = total - completed
-    eta = remaining / rate if rate > 0 else 0
+    address_rate = completed_addresses / elapsed
+    http_rate = completed_http / elapsed
+    remaining = total_addresses - completed_addresses
+    eta = remaining / address_rate if address_rate > 0 else 0
     log_info(
-        f"Progress {completed}/{total} ({completed / total * 100:.1f}%) "
-        f"errors={errors} rate={rate:.1f} req/s ETA={eta / 60:.1f} min"
+        f"Progress {completed_addresses}/{total_addresses} addresses "
+        f"({completed_addresses / total_addresses * 100:.1f}%) "
+        f"HTTP {completed_http}/{total_http} "
+        f"errors={errors} rate={address_rate:.1f} addr/s ({http_rate:.1f} http/s) "
+        f"ETA={eta / 60:.1f} min"
     )
 
 
@@ -476,13 +560,14 @@ def run_jobs_concurrently(
         log_info("No pending requests to fetch (all already saved or dataset empty).")
         return []
 
-    units = build_job_units(jobs)
     worker_count = workers or fetcher.performance.workers
-    worker_count = max(1, min(worker_count, len(units)))
+    worker_count = max(1, worker_count)
+    units = build_job_units(jobs, workers=worker_count)
     progress_every = fetcher.performance.progress_every
     results: list[dict[str, Any]] = []
     errors = 0
-    completed = 0
+    completed_addresses = 0
+    completed_http = 0
     started_at = time.perf_counter()
 
     shuffle_jobs = bool((fetcher.config.get("performance") or {}).get("shuffle_jobs", True))
@@ -493,18 +578,35 @@ def run_jobs_concurrently(
         log_info("Job order: sequential (performance.shuffle_jobs=false)")
 
     endpoint_names = sorted({endpoint["name"] for endpoint, _ in units})
-    log_info(f"Starting fetch: {total} address tasks in {len(units)} HTTP requests")
+    unit_sizes = [len(tasks) for _, tasks in units]
+    batch_units = sum(1 for size in unit_sizes if size > 1)
+    log_info(
+        f"Starting fetch: {total} address tasks in {len(units)} HTTP requests "
+        f"({batch_units} batched, workers={min(worker_count, len(units))})"
+    )
     log_info(f"Endpoints: {', '.join(endpoint_names)}")
     for endpoint_name in endpoint_names:
         sample_endpoint = next(endpoint for endpoint, _ in units if endpoint["name"] == endpoint_name)
+        endpoint_tasks = sum(len(tasks) for endpoint, tasks in units if endpoint["name"] == endpoint_name)
         endpoint_rps = get_endpoint_rps(sample_endpoint, fetcher.performance)
         mode = get_fetch_mode(sample_endpoint)
-        batch_size = get_batch_size(sample_endpoint)
-        mode_label = f"fetch_mode={mode}" + (f", batch_size={batch_size}" if mode == "batch" else "")
+        configured_batch = get_batch_size(sample_endpoint)
+        effective_batch = get_effective_batch_size(
+            sample_endpoint,
+            endpoint_tasks,
+            workers=worker_count,
+        )
+        rps_label = "unlimited" if endpoint_rps is None else f"{endpoint_rps:g}"
+        mode_label = f"fetch_mode={mode}"
+        if mode == "batch":
+            mode_label += (
+                f", batch_size={configured_batch}, effective_batch={effective_batch}, "
+                f"auto_parallel={bool((sample_endpoint.get('request') or {}).get('auto_parallel_batches', True))}"
+            )
         log_info(
             f"Route {endpoint_name}: "
             f"{fetcher.describe_route(sample_endpoint['url'], force_direct=bool(sample_endpoint.get('force_direct')))}, "
-            f"RPS={endpoint_rps:g}, {mode_label}"
+            f"RPS={rps_label}, {mode_label}"
         )
     log_info(
         f"Workers={worker_count}, "
@@ -528,10 +630,11 @@ def run_jobs_concurrently(
             for future in as_completed(future_map):
                 endpoint, tasks = future_map[future]
                 fetched_rows = future.result()
+                completed_http += 1
                 for fetched in fetched_rows:
                     on_result(fetched)
                     results.append(fetched)
-                    completed += 1
+                    completed_addresses += 1
                     if fetched.get("error"):
                         errors += 1
                         log_warn(
@@ -539,7 +642,7 @@ def run_jobs_concurrently(
                             f"{fetched.get('address_type')} "
                             f"HTTP={fetched.get('response_code')} error={fetched['error']}"
                         )
-                    elif _should_log_request(completed, total, progress_every, verbose):
+                    elif _should_log_request(completed_addresses, total, progress_every, verbose):
                         preview = str(fetched.get("address") or "")[:60]
                         if len(str(fetched.get("address") or "")) > 60:
                             preview += "..."
@@ -551,10 +654,21 @@ def run_jobs_concurrently(
                             f"address={preview!r}"
                         )
 
-                    if completed == 1 or completed % progress_every == 0 or completed == total:
-                        _print_progress(completed, total, started_at, errors)
+                    if (
+                        completed_addresses == 1
+                        or completed_addresses % progress_every == 0
+                        or completed_addresses == total
+                    ):
+                        _print_progress(
+                            completed_addresses,
+                            total,
+                            completed_http=completed_http,
+                            total_http=len(units),
+                            started_at=started_at,
+                            errors=errors,
+                        )
 
-    log_info(f"Fetch finished: {completed} done, {errors} errors")
+    log_info(f"Fetch finished: {completed_addresses} addresses, {completed_http} HTTP requests, {errors} errors")
     return results
 
 

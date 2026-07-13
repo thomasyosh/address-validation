@@ -31,7 +31,7 @@ def get_performance_settings(config: dict[str, Any]) -> PerformanceSettings:
     no_retry_codes = performance.get("no_retry_status_codes")
     return PerformanceSettings(
         workers=max(1, int(performance.get("workers", 40))),
-        requests_per_second=max(0.1, float(performance.get("requests_per_second", 4.0))),
+        requests_per_second=max(0.0, float(performance.get("requests_per_second", 4.0))),
         max_retries=max(0, int(performance.get("max_retries", 1))),
         retry_backoff_seconds=max(0.1, float(performance.get("retry_backoff_seconds", 1.0))),
         max_retry_backoff_seconds=max(
@@ -53,22 +53,34 @@ def get_performance_settings(config: dict[str, Any]) -> PerformanceSettings:
     )
 
 
-def get_endpoint_rps(endpoint: dict[str, Any], defaults: PerformanceSettings) -> float:
+def get_endpoint_rps(endpoint: dict[str, Any], defaults: PerformanceSettings) -> float | None:
+    """
+    Return max HTTP requests per second for an endpoint.
+
+    None means unlimited (no throttling). Endpoint rate_limit wins over the
+    global performance.requests_per_second default.
+    """
     rate_limit = endpoint.get("rate_limit") or {}
     if "requests_per_second" in rate_limit:
-        return max(0.1, float(rate_limit["requests_per_second"]))
-    return defaults.requests_per_second
+        value = float(rate_limit["requests_per_second"])
+        if value <= 0:
+            return None
+        return max(0.1, value)
+    return defaults.requests_per_second if defaults.requests_per_second > 0 else None
 
 
 class RateLimiter:
-    """Simple thread-safe token bucket for requests-per-second control."""
+    """Simple thread-safe spacing for HTTP requests-per-second control."""
 
-    def __init__(self, requests_per_second: float) -> None:
-        self.interval = 1.0 / requests_per_second
+    def __init__(self, requests_per_second: float | None) -> None:
+        self.unlimited = requests_per_second is None
+        self.interval = 0.0 if self.unlimited else 1.0 / requests_per_second
         self._lock = threading.Lock()
         self._next_allowed = 0.0
 
     def wait(self) -> None:
+        if self.unlimited:
+            return
         with self._lock:
             now = time.monotonic()
             if now < self._next_allowed:

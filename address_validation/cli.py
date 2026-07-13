@@ -397,6 +397,14 @@ def apply_performance_overrides(
         updated["performance"]["workers"] = workers
     if rps is not None:
         updated["performance"]["requests_per_second"] = rps
+        endpoints = []
+        for endpoint in config.get("endpoints") or []:
+            endpoint_copy = dict(endpoint)
+            rate_limit = dict(endpoint.get("rate_limit") or {})
+            rate_limit["requests_per_second"] = rps
+            endpoint_copy["rate_limit"] = rate_limit
+            endpoints.append(endpoint_copy)
+        updated["endpoints"] = endpoints
     return updated
 
 

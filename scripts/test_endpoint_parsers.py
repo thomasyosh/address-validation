@@ -86,9 +86,22 @@ tasks = [
     FetchTask(2, "EADDRESS", "ifc", None, None, None),
     FetchTask(3, "EADDRESS", "moko", None, None, None),
 ]
-units = build_job_units([(endpoint, task) for task in tasks])
-assert len(units) == 2
-assert [t.address for t in units[0][1]] == ["apm", "ifc"]
-assert [t.address for t in units[1][1]] == ["moko"]
+units = build_job_units([(endpoint, task) for task in tasks], workers=40)
+assert len(units) == 3
+assert [len(u[1]) for u in units] == [1, 1, 1]
+
+endpoint_auto = {
+    "name": "ase_query_debug",
+    "request": {
+        "address_in": "json_array",
+        "fetch_mode": "batch",
+        "batch_size": 50,
+        "auto_parallel_batches": True,
+    },
+}
+from address_validation.fetcher import get_effective_batch_size
+
+assert get_effective_batch_size(endpoint_auto, 200, workers=40) == 5
+assert get_effective_batch_size(endpoint_auto, 4, workers=40) == 1
 
 print("ok")

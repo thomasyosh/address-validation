@@ -104,13 +104,16 @@ def select_response_items(
     return items
 
 
+def _normalize_address_key(value: str) -> str:
+    return " ".join(str(value).strip().split()).casefold()
+
+
 def _lookup_data_bucket(data: dict[str, Any], query_address: str) -> Any:
     if query_address in data:
         return data[query_address]
-    # Case-insensitive fallback for minor normalization differences.
-    needle = query_address.casefold()
+    needle = _normalize_address_key(query_address)
     for key, value in data.items():
-        if str(key).casefold() == needle:
+        if _normalize_address_key(str(key)) == needle:
             return value
     return None
 

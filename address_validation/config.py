@@ -75,6 +75,12 @@ def get_endpoints(config: dict[str, Any]) -> list[dict[str, Any]]:
 
         merged = copy.deepcopy(defaults)
         merged.update(endpoint)
+        # Deep-merge nested dicts that are commonly partially overridden.
+        for nested_key in ("request", "response", "rate_limit"):
+            if isinstance(defaults.get(nested_key), dict) and isinstance(endpoint.get(nested_key), dict):
+                nested = copy.deepcopy(defaults[nested_key])
+                nested.update(endpoint[nested_key])
+                merged[nested_key] = nested
         headers = copy.deepcopy(default_headers)
         headers.update(copy.deepcopy(endpoint.get("headers") or {}))
         merged["headers"] = headers

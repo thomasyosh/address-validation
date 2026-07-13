@@ -146,24 +146,15 @@ Per-endpoint override (ASE is high; public APIs stay low):
 endpoints:
   - name: ase_query_debug
     rate_limit:
-      requests_per_second: 120
+      requests_per_second: 0   # 0 = unlimited for intranet ASE
   - name: als_hk
     rate_limit:
       requests_per_second: 2
 ```
 
-CLI overrides:
+`--rps` overrides **every** endpoint's `rate_limit.requests_per_second`. ASE endpoint `rate_limit` wins over global `performance.requests_per_second`.
 
-```powershell
-python main.py validate --workers 40 --summary
-python main.py benchmark --workers 40 --summary
-# Optional: lower public-API default without changing ASE endpoint override
-python main.py benchmark --workers 20 --rps 3 --summary
-```
-
-Retries cover common overload / IP-block responses (`429`, `403`, `503`, etc.) with exponential backoff and `Retry-After` support.
-
-Intranet ASE can take high load (`rate_limit.requests_per_second: 120`). Keep ALS / Map.gov caps low to avoid blocks.
+Intranet ASE: set `rate_limit.requests_per_second: 0` for no client throttle. Keep ALS / Map.gov caps low.
 
 ### ASE one-by-one vs batch array
 
@@ -176,19 +167,19 @@ endpoints:
       address_in: json_array
       address_key: address
       fetch_mode: batch   # or: one
-      batch_size: 50      # addresses per HTTP request when fetch_mode=batch
+      batch_size: 50      # max addresses per HTTP body
+      auto_parallel_batches: true  # split into parallel requests to use workers
 ```
 
 ```powershell
-# Many addresses in one request body (faster for ASE)
+# Many addresses per request body (faster for ASE)
 python main.py validate --fetch-mode batch --batch-size 50
 
 # One address per request
 python main.py validate --fetch-mode one
-python main.py validate --batch-size 1
 ```
 
-Batch responses are split by the `data` bucket key (the queried address) so each Excel row still gets its own result.
+Logs show `effective_batch` (actual array size per HTTP call) and `HTTP N/M` progress. Batch responses are split by the `data` bucket key per address.
 
 ## Crash safety / resume
 
