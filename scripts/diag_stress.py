@@ -1,6 +1,13 @@
 """Print how many parallel ASE HTTP calls a stress-test config can actually use."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from address_validation.cli import (
     apply_fetch_mode_overrides,
     apply_performance_overrides,
@@ -58,6 +65,9 @@ def diag(
 
 
 if __name__ == "__main__":
+    import os
+
+    os.chdir(ROOT)
     print("Your command (batch 50, workers 40, auto_parallel from config):")
     diag(workers=40, batch_size=50)
     print("Batch 50 + auto_parallel_batches: true:")
