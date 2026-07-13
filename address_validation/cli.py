@@ -92,7 +92,12 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument(
         "--workers",
         type=int,
-        help="Concurrent worker threads (default from performance.workers)",
+        help="Concurrent client threads for HTTP requests (default from performance.workers)",
+    )
+    validate_parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help="Send one HTTP request at a time (sets workers=1, for downsized servers)",
     )
     validate_parser.add_argument(
         "--rps",
@@ -164,7 +169,12 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_parser.add_argument(
         "--workers",
         type=int,
-        help="Concurrent worker threads (default from performance.workers)",
+        help="Concurrent client threads for HTTP requests (default from performance.workers)",
+    )
+    benchmark_parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help="Send one HTTP request at a time (sets workers=1, for downsized servers)",
     )
     benchmark_parser.add_argument(
         "--rps",
@@ -388,13 +398,20 @@ def apply_performance_overrides(
     *,
     workers: int | None = None,
     rps: float | None = None,
+    sequential: bool | None = None,
 ) -> dict[str, Any]:
-    if workers is None and rps is None:
+    if workers is None and rps is None and sequential is None:
         return config
     updated = dict(config)
     updated["performance"] = dict(config.get("performance") or {})
+    if sequential is not None:
+        updated["performance"]["sequential"] = sequential
+        if sequential:
+            updated["performance"]["workers"] = 1
     if workers is not None:
         updated["performance"]["workers"] = workers
+        if workers == 1:
+            updated["performance"]["sequential"] = True
     if rps is not None:
         updated["performance"]["requests_per_second"] = rps
         endpoints = []
@@ -763,6 +780,7 @@ def handle_validate(args: argparse.Namespace, config: dict[str, Any], database: 
         config,
         workers=getattr(args, "workers", None),
         rps=getattr(args, "rps", None),
+        sequential=True if getattr(args, "sequential", False) else None,
     )
     config = apply_fetch_mode_overrides(
         config,
@@ -842,6 +860,7 @@ def handle_benchmark(args: argparse.Namespace, config: dict[str, Any], database:
         config,
         workers=getattr(args, "workers", None),
         rps=getattr(args, "rps", None),
+        sequential=True if getattr(args, "sequential", False) else None,
     )
     config = apply_fetch_mode_overrides(
         config,

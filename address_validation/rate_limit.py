@@ -15,6 +15,7 @@ NO_RETRY_STATUS_CODES = {504}
 @dataclass
 class PerformanceSettings:
     workers: int = 40
+    sequential: bool = False
     requests_per_second: float = 4.0
     max_retries: int = 1
     retry_backoff_seconds: float = 1.0
@@ -29,8 +30,11 @@ def get_performance_settings(config: dict[str, Any]) -> PerformanceSettings:
     performance = config.get("performance") or {}
     retry_codes = performance.get("retry_status_codes")
     no_retry_codes = performance.get("no_retry_status_codes")
+    sequential = bool(performance.get("sequential", False))
+    workers = 1 if sequential else max(1, int(performance.get("workers", 40)))
     return PerformanceSettings(
-        workers=max(1, int(performance.get("workers", 40))),
+        workers=workers,
+        sequential=sequential,
         requests_per_second=max(0.0, float(performance.get("requests_per_second", 4.0))),
         max_retries=max(0, int(performance.get("max_retries", 1))),
         retry_backoff_seconds=max(0.1, float(performance.get("retry_backoff_seconds", 1.0))),
@@ -67,6 +71,19 @@ def get_endpoint_rps(endpoint: dict[str, Any], defaults: PerformanceSettings) ->
             return None
         return max(0.1, value)
     return defaults.requests_per_second if defaults.requests_per_second > 0 else None
+
+
+def get_endpoint_max_workers(endpoint: dict[str, Any], global_workers: int) -> int:
+    """
+    Max in-flight HTTP requests for one endpoint.
+
+    Use max_workers: 1 on a downsized intranet server so the client never sends
+    parallel requests to that host, even when performance.workers is higher.
+    """
+    limit = endpoint.get("max_workers")
+    if limit is None:
+        return max(1, global_workers)
+    return max(1, min(global_workers, int(limit)))
 
 
 class RateLimiter:

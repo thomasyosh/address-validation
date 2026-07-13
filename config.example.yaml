@@ -39,10 +39,10 @@ defaults:
     Accept: application/json
     Content-Type: application/json
 
-# Throughput controls for large datasets (20k-50k addresses x 3 endpoints).
-# Raise workers for intranet ASE; keep default RPS low and override per endpoint.
+# Client-side HTTP concurrency (ThreadPoolExecutor). Not server multi-threading.
 performance:
-  workers: 40
+  workers: 1
+  sequential: true
   requests_per_second: 4
   max_retries: 1
   retry_backoff_seconds: 1.0
@@ -75,16 +75,16 @@ endpoints:
     url: https://10.77.242.157/query_debug
     host_header: ase.testingaddress.com
     force_direct: true
+    max_workers: 1
     method: POST
     rate_limit:
       requests_per_second: 0
     request:
       address_in: json_array
       address_key: address
-      # one = one address per HTTP call; batch = many addresses in one array body
       fetch_mode: batch
       batch_size: 50
-      auto_parallel_batches: true
+      auto_parallel_batches: false
     response:
       selection: first_in_data_buckets
       data_path: data

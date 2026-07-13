@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import random
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -24,6 +25,7 @@ from address_validation.proxy import apply_no_proxy_env, get_proxy_settings, hos
 from address_validation.rate_limit import (
     RateLimiter,
     compute_backoff_seconds,
+    get_endpoint_max_workers,
     get_endpoint_rps,
     get_performance_settings,
     parse_retry_after,
@@ -187,7 +189,8 @@ def build_job_units(
     units: list[tuple[dict[str, Any], list[FetchTask]]] = []
     for name in order:
         endpoint, tasks = by_endpoint[name]
-        size = get_effective_batch_size(endpoint, len(tasks), workers=workers)
+        endpoint_workers = get_endpoint_max_workers(endpoint, workers)
+        size = get_effective_batch_size(endpoint, len(tasks), workers=endpoint_workers)
         for index in range(0, len(tasks), size):
             units.append((endpoint, tasks[index : index + size]))
     return units
@@ -214,6 +217,24 @@ class AddressFetcher:
         self._direct_client: httpx.Client | None = None
         self._session_active = False
         self._limiters: dict[str, RateLimiter] = {}
+        self._endpoint_semaphores: dict[str, threading.Semaphore] = {}
+
+    def get_endpoint_semaphore(self, endpoint: dict[str, Any]) -> threading.Semaphore:
+        name = endpoint["name"]
+        if name not in self._endpoint_semaphores:
+            limit = get_endpoint_max_workers(endpoint, self.performance.workers)
+            self._endpoint_semaphores[name] = threading.Semaphore(limit)
+        return self._endpoint_semaphores[name]
+
+    @contextmanager
+    def endpoint_request_slot(self, endpoint: dict[str, Any]) -> Iterator[None]:
+        """Limit parallel in-flight HTTP calls per endpoint (client-side threading)."""
+        semaphore = self.get_endpoint_semaphore(endpoint)
+        semaphore.acquire()
+        try:
+            yield
+        finally:
+            semaphore.release()
 
     def get_limiter(self, endpoint: dict[str, Any]) -> RateLimiter:
         name = endpoint["name"]
@@ -312,85 +333,86 @@ class AddressFetcher:
             attempts += 1
             limiter.wait()
             try:
-                owns_client = False
-                force_direct = bool(endpoint.get("force_direct", False))
-                if self._session_active:
-                    client = self._client_for_url(request["url"], force_direct=force_direct)
-                else:
-                    bypass = force_direct or host_bypasses_proxy(
-                        request["url"],
-                        self.proxy_settings.no_proxy,
-                    )
-                    client = self._create_client(
-                        use_proxy=self.proxy_settings.enabled and not bypass
-                    )
-                    owns_client = True
+                with self.endpoint_request_slot(endpoint):
+                    owns_client = False
+                    force_direct = bool(endpoint.get("force_direct", False))
+                    if self._session_active:
+                        client = self._client_for_url(request["url"], force_direct=force_direct)
+                    else:
+                        bypass = force_direct or host_bypasses_proxy(
+                            request["url"],
+                            self.proxy_settings.no_proxy,
+                        )
+                        client = self._create_client(
+                            use_proxy=self.proxy_settings.enabled and not bypass
+                        )
+                        owns_client = True
 
-                try:
-                    started = time.perf_counter()
-                    response = client.request(**request, timeout=request_timeout)
-                    latency_ms = (time.perf_counter() - started) * 1000
-                    status_code = response.status_code
-                    response_body = response.text
+                    try:
+                        started = time.perf_counter()
+                        response = client.request(**request, timeout=request_timeout)
+                        latency_ms = (time.perf_counter() - started) * 1000
+                        status_code = response.status_code
+                        response_body = response.text
 
-                    if (
-                        len(tasks) > 1
-                        and status_code is not None
-                        and 200 <= status_code < 300
-                        and response_body
-                    ):
-                        from address_validation.result_parser import _lookup_data_bucket, parse_response_json
+                        if (
+                            len(tasks) > 1
+                            and status_code is not None
+                            and 200 <= status_code < 300
+                            and response_body
+                        ):
+                            from address_validation.result_parser import _lookup_data_bucket, parse_response_json
 
-                        payload = parse_response_json(response_body)
-                        data = payload.get("data") if isinstance(payload, dict) else None
-                        if isinstance(data, dict):
-                            matched = sum(
-                                1 for task in tasks if _lookup_data_bucket(data, task.address) is not None
-                            )
-                            if matched < len(tasks):
-                                log_warn(
-                                    f"{endpoint['name']} batch matched {matched}/{len(tasks)} "
-                                    "addresses in response data keys"
+                            payload = parse_response_json(response_body)
+                            data = payload.get("data") if isinstance(payload, dict) else None
+                            if isinstance(data, dict):
+                                matched = sum(
+                                    1 for task in tasks if _lookup_data_bucket(data, task.address) is not None
                                 )
+                                if matched < len(tasks):
+                                    log_warn(
+                                        f"{endpoint['name']} batch matched {matched}/{len(tasks)} "
+                                        "addresses in response data keys"
+                                    )
 
-                    if status_code in self.performance.no_retry_status_codes:
-                        error = f"HTTP {status_code} (no retry)"
-                        log_warn(
-                            f"HTTP {status_code} from {endpoint['name']} "
-                            f"{label} — skipping retries, continuing"
-                        )
+                        if status_code in self.performance.no_retry_status_codes:
+                            error = f"HTTP {status_code} (no retry)"
+                            log_warn(
+                                f"HTTP {status_code} from {endpoint['name']} "
+                                f"{label} — skipping retries, continuing"
+                            )
+                            break
+
+                        if should_retry_status(status_code, self.performance, attempts):
+                            retry_after = parse_retry_after(response.headers.get("Retry-After"))
+                            delay = compute_backoff_seconds(
+                                attempts - 1,
+                                self.performance.retry_backoff_seconds,
+                                retry_after=retry_after,
+                                max_seconds=self.performance.max_retry_backoff_seconds,
+                            )
+                            log_warn(
+                                f"HTTP {status_code} from {endpoint['name']} {label} "
+                                f"(retry {attempts}/{self.performance.max_retries}), "
+                                f"sleeping {delay:.1f}s"
+                            )
+                            time.sleep(delay)
+                            continue
+
+                        if status_code in self.performance.retry_status_codes:
+                            error = f"HTTP {status_code} after {attempts} attempts"
+                            log_warn(
+                                f"Giving up on {endpoint['name']} {label} after {attempts} attempts "
+                                f"(HTTP {status_code})"
+                            )
+                            break
+
+                        response.raise_for_status()
+                        error = None
                         break
-
-                    if should_retry_status(status_code, self.performance, attempts):
-                        retry_after = parse_retry_after(response.headers.get("Retry-After"))
-                        delay = compute_backoff_seconds(
-                            attempts - 1,
-                            self.performance.retry_backoff_seconds,
-                            retry_after=retry_after,
-                            max_seconds=self.performance.max_retry_backoff_seconds,
-                        )
-                        log_warn(
-                            f"HTTP {status_code} from {endpoint['name']} {label} "
-                            f"(retry {attempts}/{self.performance.max_retries}), "
-                            f"sleeping {delay:.1f}s"
-                        )
-                        time.sleep(delay)
-                        continue
-
-                    if status_code in self.performance.retry_status_codes:
-                        error = f"HTTP {status_code} after {attempts} attempts"
-                        log_warn(
-                            f"Giving up on {endpoint['name']} {label} after {attempts} attempts "
-                            f"(HTTP {status_code})"
-                        )
-                        break
-
-                    response.raise_for_status()
-                    error = None
-                    break
-                finally:
-                    if owns_client:
-                        client.close()
+                    finally:
+                        if owns_client:
+                            client.close()
 
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code if exc.response is not None else status_code
@@ -594,8 +616,9 @@ def run_jobs_concurrently(
         effective_batch = get_effective_batch_size(
             sample_endpoint,
             endpoint_tasks,
-            workers=worker_count,
+            workers=get_endpoint_max_workers(sample_endpoint, worker_count),
         )
+        endpoint_max_workers = get_endpoint_max_workers(sample_endpoint, worker_count)
         rps_label = "unlimited" if endpoint_rps is None else f"{endpoint_rps:g}"
         mode_label = f"fetch_mode={mode}"
         if mode == "batch":
@@ -606,10 +629,11 @@ def run_jobs_concurrently(
         log_info(
             f"Route {endpoint_name}: "
             f"{fetcher.describe_route(sample_endpoint['url'], force_direct=bool(sample_endpoint.get('force_direct')))}, "
-            f"RPS={rps_label}, {mode_label}"
+            f"RPS={rps_label}, max_workers={endpoint_max_workers}, {mode_label}"
         )
+    concurrency_label = "sequential (1 client thread)" if fetcher.performance.sequential else "multi-threaded client"
     log_info(
-        f"Workers={worker_count}, "
+        f"Workers={worker_count} ({concurrency_label}), "
         f"default RPS={fetcher.performance.requests_per_second:g}/endpoint, "
         f"max_retries={fetcher.performance.max_retries}"
     )

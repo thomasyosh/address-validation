@@ -128,12 +128,46 @@ endpoints:
 
 ## Performance for large datasets (20k–50k)
 
-Fetching is concurrent with per-endpoint rate limiting and automatic retries.
+Fetching uses **client-side threads** (`ThreadPoolExecutor`) to send HTTP requests in parallel. This is **not** server multi-threading — ASE still receives normal HTTP POST calls.
+
+| Setting | Meaning |
+|---------|---------|
+| `fetch_mode: batch` | Many addresses in one HTTP body `{"address":[...]}` |
+| `performance.workers` | Client parallel HTTP threads |
+| `performance.sequential: true` | Force one request at a time (`workers: 1`) |
+| `endpoints[].max_workers` | Per-endpoint cap on parallel in-flight HTTP calls |
+
+### Mixed: ASE single-thread + public APIs multi-thread
+
+Use **per-endpoint** `max_workers` — do **not** set `sequential: true` (that limits all endpoints).
 
 ```yaml
 performance:
-  workers: 40                # parallel threads (ASE can use most of these)
-  requests_per_second: 4     # default cap for public APIs
+  workers: 40
+  sequential: false
+
+endpoints:
+  - name: ase_query_debug
+    max_workers: 1          # only one ASE HTTP call in flight
+    request:
+      fetch_mode: batch
+      batch_size: 50
+      auto_parallel_batches: false
+
+  - name: als_hk
+    # no max_workers → uses performance.workers (40)
+    rate_limit:
+      requests_per_second: 2
+
+  - name: map_gov_hk
+    rate_limit:
+      requests_per_second: 4
+```
+
+During **benchmark**, ALS/Map.gov requests run in parallel while ASE stays at one request at a time. Logs show `max_workers=1` for ASE and `max_workers=40` for others.
+
+Do **not** use `--sequential` for this setup (it forces `workers: 1` globally).
+
   max_retries: 1
   retry_backoff_seconds: 1.0
   batch_save_size: 50
@@ -145,6 +179,7 @@ Per-endpoint override (ASE is high; public APIs stay low):
 ```yaml
 endpoints:
   - name: ase_query_debug
+    max_workers: 1           # optional: cap parallel ASE calls
     rate_limit:
       requests_per_second: 0   # 0 = unlimited for intranet ASE
   - name: als_hk
@@ -158,25 +193,20 @@ Intranet ASE: set `rate_limit.requests_per_second: 0` for no client throttle. Ke
 
 ### ASE one-by-one vs batch array
 
-`ase_query_debug` accepts `{"address":["apm","ifc",...]}`. Choose how to call it:
+`fetch_mode: batch` groups addresses into one JSON array. **Threading is separate** — controlled by `workers` / `max_workers` / `sequential`.
 
 ```yaml
 endpoints:
   - name: ase_query_debug
     request:
-      address_in: json_array
-      address_key: address
       fetch_mode: batch   # or: one
-      batch_size: 50      # max addresses per HTTP body
-      auto_parallel_batches: true  # split into parallel requests to use workers
+      batch_size: 50
+      auto_parallel_batches: false  # true only when workers > 1
 ```
 
 ```powershell
-# Many addresses per request body (faster for ASE)
-python main.py validate --fetch-mode batch --batch-size 50
-
-# One address per request
-python main.py validate --fetch-mode one
+python main.py validate --sequential
+python main.py validate --workers 1 --fetch-mode batch
 ```
 
 Logs show `effective_batch` (actual array size per HTTP call) and `HTTP N/M` progress. Batch responses are split by the `data` bucket key per address.
