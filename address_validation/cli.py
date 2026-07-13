@@ -137,6 +137,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["single-thread", "multi-thread"],
         help="Client HTTP concurrency for json_array endpoints (threading, not multiprocessing)",
     )
+    validate_parser.add_argument(
+        "--auto-parallel-batches",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="When fetch_mode=batch: split into more parallel HTTP units (default from config)",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark",
@@ -218,6 +224,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--concurrency",
         choices=["single-thread", "multi-thread"],
         help="Client HTTP concurrency for json_array endpoints (threading, not multiprocessing)",
+    )
+    benchmark_parser.add_argument(
+        "--auto-parallel-batches",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="When fetch_mode=batch: split into more parallel HTTP units (default from config)",
     )
 
     list_parser = subparsers.add_parser("list-runs", help="List saved runs")
@@ -441,9 +453,15 @@ def apply_fetch_mode_overrides(
     fetch_mode: str | None = None,
     batch_size: int | None = None,
     concurrency: str | None = None,
+    auto_parallel_batches: bool | None = None,
 ) -> dict[str, Any]:
     """Apply fetch profile overrides to json_array endpoints (e.g. ASE)."""
-    if fetch_mode is None and batch_size is None and concurrency is None:
+    if (
+        fetch_mode is None
+        and batch_size is None
+        and concurrency is None
+        and auto_parallel_batches is None
+    ):
         return config
 
     updated = dict(config)
@@ -462,6 +480,8 @@ def apply_fetch_mode_overrides(
                     request["fetch_mode"] = request.get("fetch_mode") or "batch"
             if concurrency is not None:
                 request["concurrency"] = concurrency
+            if auto_parallel_batches is not None:
+                request["auto_parallel_batches"] = auto_parallel_batches
             endpoint_copy["request"] = request
         endpoints.append(endpoint_copy)
     updated["endpoints"] = endpoints
@@ -800,6 +820,7 @@ def handle_validate(args: argparse.Namespace, config: dict[str, Any], database: 
         fetch_mode=getattr(args, "fetch_mode", None),
         batch_size=getattr(args, "batch_size", None),
         concurrency=getattr(args, "concurrency", None),
+        auto_parallel_batches=getattr(args, "auto_parallel_batches", None),
     )
     settings = get_comparison_settings(config)
     log_info("Loading dataset...")
@@ -881,6 +902,7 @@ def handle_benchmark(args: argparse.Namespace, config: dict[str, Any], database:
         fetch_mode=getattr(args, "fetch_mode", None),
         batch_size=getattr(args, "batch_size", None),
         concurrency=getattr(args, "concurrency", None),
+        auto_parallel_batches=getattr(args, "auto_parallel_batches", None),
     )
     settings = get_comparison_settings(config)
     log_info("Loading dataset...")
