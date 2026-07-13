@@ -30,6 +30,7 @@ from address_validation.rate_limit import (
     get_endpoint_retry_settings,
     get_endpoint_rps,
     get_performance_settings,
+    get_request_concurrency,
     parse_retry_after,
     should_retry_status,
 )
@@ -156,7 +157,10 @@ def get_effective_batch_size(
         return 1
 
     request_settings = endpoint.get("request") or {}
-    auto_parallel = request_settings.get("auto_parallel_batches", True)
+    if get_request_concurrency(endpoint) == "single-thread":
+        auto_parallel = False
+    else:
+        auto_parallel = request_settings.get("auto_parallel_batches", True)
     if not auto_parallel:
         return min(configured, task_count)
 
@@ -626,13 +630,15 @@ def run_jobs_concurrently(
             workers=get_endpoint_max_workers(sample_endpoint, worker_count),
         )
         endpoint_max_workers = get_endpoint_max_workers(sample_endpoint, worker_count)
+        concurrency = get_request_concurrency(sample_endpoint)
         rps_label = "unlimited" if endpoint_rps is None else f"{endpoint_rps:g}"
-        mode_label = f"fetch_mode={mode}"
+        mode_label = f"fetch_mode={mode}, concurrency={concurrency}"
         if mode == "batch":
             mode_label += (
-                f", batch_size={configured_batch}, effective_batch={effective_batch}, "
-                f"auto_parallel={bool((sample_endpoint.get('request') or {}).get('auto_parallel_batches', True))}"
+                f", batch_size={configured_batch}, effective_batch={effective_batch}"
             )
+        elif mode == "one":
+            mode_label += ", batch_size=n/a (one address per HTTP call)"
         log_info(
             f"Route {endpoint_name}: "
             f"{fetcher.describe_route(sample_endpoint['url'], force_direct=bool(sample_endpoint.get('force_direct')))}, "

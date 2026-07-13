@@ -104,4 +104,36 @@ from address_validation.fetcher import get_effective_batch_size
 assert get_effective_batch_size(endpoint_auto, 200, workers=40) == 5
 assert get_effective_batch_size(endpoint_auto, 4, workers=40) == 1
 
+from address_validation.rate_limit import get_endpoint_max_workers, get_request_concurrency
+
+single = {
+    "name": "ase_query_debug",
+    "request": {"address_in": "json_array", "fetch_mode": "one", "concurrency": "single-thread"},
+}
+assert get_request_concurrency(single) == "single-thread"
+assert get_endpoint_max_workers(single, 40) == 1
+
+parallel = {
+    "name": "ase_query_debug",
+    "request": {"address_in": "json_array", "fetch_mode": "one", "concurrency": "multi-thread"},
+}
+assert get_request_concurrency(parallel) == "multi-thread"
+assert get_endpoint_max_workers(parallel, 40) == 40
+assert get_endpoint_max_workers({**parallel, "max_workers": 10}, 40) == 10
+
+legacy = {"name": "ase_query_debug", "max_workers": 1, "request": {"address_in": "json_array"}}
+assert get_request_concurrency(legacy) == "single-thread"
+
+batch_single = {
+    "name": "ase_query_debug",
+    "request": {
+        "address_in": "json_array",
+        "fetch_mode": "batch",
+        "concurrency": "single-thread",
+        "batch_size": 50,
+        "auto_parallel_batches": True,
+    },
+}
+assert get_effective_batch_size(batch_single, 200, workers=40) == 50
+
 print("ok")

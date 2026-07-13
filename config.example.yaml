@@ -89,7 +89,14 @@ endpoints:
     request:
       address_in: json_array
       address_key: address
+      # Fetch profile presets:
+      #   fetch_mode: one,  concurrency: multi-thread   — parallel one-address HTTP calls
+      #   fetch_mode: one,  concurrency: single-thread — one address per call, serial
+      #   fetch_mode: batch, concurrency: single-thread, batch_size: N — array body, serial
       fetch_mode: one
+      concurrency: single-thread
+      batch_size: 50
+      auto_parallel_batches: false
       timeout_seconds: 120
     response:
       selection: first_in_data_buckets

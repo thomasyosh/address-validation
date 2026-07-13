@@ -82,17 +82,39 @@ def get_endpoint_rps(endpoint: dict[str, Any], defaults: PerformanceSettings) ->
     return defaults.requests_per_second if defaults.requests_per_second > 0 else None
 
 
+def get_request_concurrency(endpoint: dict[str, Any]) -> str:
+    """
+    Client-side HTTP concurrency for one endpoint.
+
+    - single-thread: at most one in-flight HTTP request
+    - multi-thread: parallel HTTP requests (ThreadPoolExecutor; not multiprocessing)
+    """
+    request = endpoint.get("request") or {}
+    raw = request.get("concurrency")
+    if raw is not None:
+        value = str(raw).strip().lower().replace("_", "-")
+        if value in {"single", "single-thread", "sequential", "serial"}:
+            return "single-thread"
+        if value in {"multi", "multi-thread", "threaded", "parallel"}:
+            return "multi-thread"
+    if endpoint.get("max_workers") is not None and int(endpoint["max_workers"]) <= 1:
+        return "single-thread"
+    return "multi-thread"
+
+
 def get_endpoint_max_workers(endpoint: dict[str, Any], global_workers: int) -> int:
     """
     Max in-flight HTTP requests for one endpoint.
 
-    Use max_workers: 1 on a downsized intranet server so the client never sends
-    parallel requests to that host, even when performance.workers is higher.
+    Prefer request.concurrency; max_workers remains an optional cap when multi-thread.
     """
+    if get_request_concurrency(endpoint) == "single-thread":
+        return 1
+
     limit = endpoint.get("max_workers")
-    if limit is None:
-        return max(1, global_workers)
-    return max(1, min(global_workers, int(limit)))
+    if limit is not None:
+        return max(1, min(global_workers, int(limit)))
+    return max(1, global_workers)
 
 
 class RateLimiter:

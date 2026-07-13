@@ -132,6 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Addresses per HTTP request when fetch_mode=batch (use 1 for one-by-one)",
     )
+    validate_parser.add_argument(
+        "--concurrency",
+        choices=["single-thread", "multi-thread"],
+        help="Client HTTP concurrency for json_array endpoints (threading, not multiprocessing)",
+    )
 
     benchmark_parser = subparsers.add_parser(
         "benchmark",
@@ -208,6 +213,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--batch-size",
         type=int,
         help="Addresses per HTTP request when fetch_mode=batch (use 1 for one-by-one)",
+    )
+    benchmark_parser.add_argument(
+        "--concurrency",
+        choices=["single-thread", "multi-thread"],
+        help="Client HTTP concurrency for json_array endpoints (threading, not multiprocessing)",
     )
 
     list_parser = subparsers.add_parser("list-runs", help="List saved runs")
@@ -430,9 +440,10 @@ def apply_fetch_mode_overrides(
     *,
     fetch_mode: str | None = None,
     batch_size: int | None = None,
+    concurrency: str | None = None,
 ) -> dict[str, Any]:
-    """Apply one/batch overrides to endpoints that accept json_array bodies (e.g. ASE)."""
-    if fetch_mode is None and batch_size is None:
+    """Apply fetch profile overrides to json_array endpoints (e.g. ASE)."""
+    if fetch_mode is None and batch_size is None and concurrency is None:
         return config
 
     updated = dict(config)
@@ -449,6 +460,8 @@ def apply_fetch_mode_overrides(
                     request["fetch_mode"] = "one"
                 elif fetch_mode is None:
                     request["fetch_mode"] = request.get("fetch_mode") or "batch"
+            if concurrency is not None:
+                request["concurrency"] = concurrency
             endpoint_copy["request"] = request
         endpoints.append(endpoint_copy)
     updated["endpoints"] = endpoints
@@ -786,6 +799,7 @@ def handle_validate(args: argparse.Namespace, config: dict[str, Any], database: 
         config,
         fetch_mode=getattr(args, "fetch_mode", None),
         batch_size=getattr(args, "batch_size", None),
+        concurrency=getattr(args, "concurrency", None),
     )
     settings = get_comparison_settings(config)
     log_info("Loading dataset...")
@@ -866,6 +880,7 @@ def handle_benchmark(args: argparse.Namespace, config: dict[str, Any], database:
         config,
         fetch_mode=getattr(args, "fetch_mode", None),
         batch_size=getattr(args, "batch_size", None),
+        concurrency=getattr(args, "concurrency", None),
     )
     settings = get_comparison_settings(config)
     log_info("Loading dataset...")
