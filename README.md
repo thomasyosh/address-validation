@@ -148,6 +148,49 @@ comparison:
 
 The first validation run has no previous run to compare — establish a baseline first, then use `--compare-with-previous` on every AI update after that.
 
+### Host the repo on company GitLab (before Jenkins)
+
+1. **Create a GitLab project** (empty, no README) in your company GitLab, e.g.  
+   `https://gitlab.yourcompany.com/your-team/address-search-validation.git`
+
+2. **Point your local clone at GitLab** (your remote is currently named `main`):
+
+```powershell
+cd C:\Users\Leospace\Documents\AddressSearchValidation
+
+# Replace with your real GitLab clone URL (HTTPS or SSH)
+git remote set-url main https://gitlab.yourcompany.com/your-team/address-search-validation.git
+
+git remote -v
+git push -u main main
+```
+
+SSH example:
+
+```powershell
+git remote set-url main git@gitlab.yourcompany.com:your-team/address-search-validation.git
+git push -u main main
+```
+
+3. **Do not commit secrets or local data** — already gitignored:
+   - `config.yaml`, `config.local.yaml`
+   - `data/` (includes `addresses.xlsx`)
+   - `results/`, `*.db`
+
+   Jenkins needs `config.yaml` and `addresses.xlsx` copied onto the server separately (see `scripts/jenkins_integration_README.txt`).
+
+4. **Tell Jenkins the GitLab URL** — set on the Jenkins agent or in the job:
+
+```bash
+export ADDRESS_VALIDATION_GIT_URL='https://gitlab.yourcompany.com/your-team/address-search-validation.git'
+```
+
+`scripts/jenkins_post_deploy.sh` uses that variable on first clone, then `git pull` on later builds.
+
+For **private** GitLab repos, your colleague must add Jenkins credentials (SSH key or HTTPS token) — ask your GitLab/Jenkins admin.
+
+5. **Append** `scripts/jenkins_post_deploy.sh` to the existing `deploy-uat-opensearch-data-bldg-street` Execute shell step (see `scripts/jenkins_integration_README.txt`).
+
 ## What “difference” means
 
 When your colleague asks what changed vs last run / last month / a date, the useful diff is **match status within the metre tolerance** (default **50m**):
