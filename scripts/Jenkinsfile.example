@@ -1,0 +1,63 @@
+// Example Jenkins pipeline stage for your colleague's AI update job.
+// Copy the "Address validation" stage into his existing Jenkinsfile, or use this as a template.
+//
+// Prerequisites on the Jenkins agent:
+//   - Python 3.10+
+//   - Network access to ASE (10.77.242.157 / ase.testingaddress.com)
+//   - This repo checked out (or installed on a shared path)
+//   - data/addresses.xlsx test dataset present
+//   - config.yaml pointing at ase_query_debug (updated automatically if same URL)
+
+pipeline {
+    agent any
+
+    environment {
+        // Path to this repo on the Jenkins agent (adjust for your server)
+        VALIDATION_DIR = 'C:\\jenkins\\workspace\\AddressSearchValidation'
+        // Optional company proxy for public APIs (ASE uses force_direct / NO_PROXY)
+        // HTTPS_PROXY = 'http://proxy.company:8080'
+        NO_PROXY = 'ase.testingaddress.com,10.77.242.157,10.0.0.0/8,localhost,127.0.0.1'
+    }
+
+    stages {
+        // ... your colleague's existing stages: build AI model, deploy to ASE, etc. ...
+
+        stage('Address validation') {
+            steps {
+                dir("${env.VALIDATION_DIR}") {
+                    bat '''
+                        python -m pip install -r requirements.txt
+                        python main.py validate --compare-with-previous --max-rate-delta 1 --label jenkins-build-%BUILD_NUMBER%
+                    '''
+                    // Or: powershell '.\\scripts\\ci_validate.ps1 -MaxRateDelta 1'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            dir("${env.VALIDATION_DIR}") {
+                // Keep reports and DB for debugging failed builds
+                archiveArtifacts artifacts: 'results/**', allowEmptyArchive: true
+                archiveArtifacts artifacts: 'data/address_validation.db', allowEmptyArchive: true
+            }
+        }
+        failure {
+            echo 'Address validation failed: English or Chinese match-rate changed by >= 1 percentage point.'
+        }
+    }
+}
+
+// --- Linux agent variant (replace the bat block with sh) ---
+//
+// stage('Address validation') {
+//     steps {
+//         dir("${env.VALIDATION_DIR}") {
+//             sh '''
+//                 python3 -m pip install -r requirements.txt
+//                 python3 main.py validate --compare-with-previous --max-rate-delta 1 --label jenkins-build-${BUILD_NUMBER}
+//             '''
+//         }
+//     }
+// }

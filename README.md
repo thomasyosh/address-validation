@@ -102,6 +102,52 @@ This rewrites `summary.*`, `mismatches.csv`, `match_diff.*`, etc. from the datab
 
 Raw fetch data also stays in SQLite (`data/address_validation.db`) so you can re-compare later.
 
+## CI / Jenkins after an AI model update
+
+When your colleague updates the ASE `query_debug` model, run validation and compare the **match-rate percentage** (within tolerance) vs the previous run.
+
+**Acceptance rule:** English and Chinese match rates must each change by **less than 1 percentage point** (e.g. 94.2% → 94.8% is OK; 94.2% → 95.5% is not).
+
+One command (fetch + compare + pass/fail exit code):
+
+```powershell
+python main.py validate --compare-with-previous --max-rate-delta 1 --label "ai-update-build-42"
+```
+
+Or split into two steps:
+
+```powershell
+python main.py validate --label "ai-update-build-42"
+python main.py compare --with-previous --max-rate-delta 1
+```
+
+Jenkins helper script:
+
+```powershell
+.\scripts\ci_validate.ps1 -Label "build-42" -MaxRateDelta 1
+```
+
+Output includes a table like:
+
+```text
+Language     Previous    Current      Delta    |Delta|   Result
+English        94.50%      94.80%     +0.30%      0.30%     PASS
+Chinese        92.10%      92.50%     +0.40%      0.40%     PASS
+Overall: PASS
+```
+
+- Exit code **0** = acceptable for CI  
+- Exit code **1** = English or Chinese moved by ≥ 1 percentage point  
+
+Optional config default (CLI `--max-rate-delta` overrides):
+
+```yaml
+comparison:
+  max_match_rate_delta_percent: 1.0
+```
+
+The first validation run has no previous run to compare — establish a baseline first, then use `--compare-with-previous` on every AI update after that.
+
 ## What “difference” means
 
 When your colleague asks what changed vs last run / last month / a date, the useful diff is **match status within the metre tolerance** (default **50m**):

@@ -136,4 +136,39 @@ batch_single = {
 }
 assert get_effective_batch_size(batch_single, 200, workers=40) == 50
 
+from address_validation.summary import MatchSummaryTable, SummaryRow, compare_match_rates
+
+current = MatchSummaryTable(
+    run_id=2,
+    criteria="coordinates",
+    tolerance_meters=50.0,
+    rows=[
+        SummaryRow("Ase — English", 945, 94.5, address_type="EADDRESS", endpoint="ase_query_debug"),
+        SummaryRow("Ase — Chinese", 921, 92.1, address_type="CADDRESS", endpoint="ase_query_debug"),
+    ],
+)
+previous = MatchSummaryTable(
+    run_id=1,
+    criteria="coordinates",
+    tolerance_meters=50.0,
+    rows=[
+        SummaryRow("Ase — English", 942, 94.2, address_type="EADDRESS", endpoint="ase_query_debug"),
+        SummaryRow("Ase — Chinese", 920, 92.0, address_type="CADDRESS", endpoint="ase_query_debug"),
+    ],
+)
+rate_ok = compare_match_rates(current, previous, endpoint="ase_query_debug", max_delta_percent=1.0)
+assert rate_ok.passed
+rate_fail = compare_match_rates(
+    MatchSummaryTable(
+        run_id=3,
+        criteria="coordinates",
+        tolerance_meters=50.0,
+        rows=[SummaryRow("Ase — English", 960, 96.0, address_type="EADDRESS", endpoint="ase_query_debug")],
+    ),
+    previous,
+    endpoint="ase_query_debug",
+    max_delta_percent=1.0,
+)
+assert not rate_fail.passed
+
 print("ok")

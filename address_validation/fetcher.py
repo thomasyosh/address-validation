@@ -653,6 +653,10 @@ def run_jobs_concurrently(
         f"default RPS={fetcher.performance.requests_per_second:g}/endpoint, "
         f"max_retries={fetcher.performance.max_retries}"
     )
+    log_info(
+        f"Progress logs every {progress_every} completed addresses "
+        f"(performance.progress_every — not batch size; use -v for every row)"
+    )
     if fetcher.proxy_settings.enabled:
         log_info(f"Proxy: {fetcher.proxy_settings.redacted_summary()}")
     else:

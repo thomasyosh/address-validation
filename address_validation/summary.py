@@ -162,3 +162,111 @@ def match_summary_to_csv(table: MatchSummaryTable) -> str:
             f"{row.column_name},{row.number},{row.percentage:.2f}%,{address_type},{endpoint}"
         )
     return "\n".join(lines) + "\n"
+
+
+@dataclass
+class MatchRateDeltaRow:
+    address_type: str
+    label: str
+    current_percentage: float
+    previous_percentage: float
+    delta_percentage: float
+    abs_delta_percentage: float
+    passed: bool
+
+
+@dataclass
+class MatchRateComparison:
+    """
+    Compare match-rate percentages (within tolerance) between two runs.
+
+    Used for CI gates after an AI model update: pass when English and Chinese
+    match rates each move by less than a threshold (e.g. 1 percentage point).
+    """
+
+    current_run_id: int
+    previous_run_id: int
+    endpoint: str | None
+    max_allowed_delta_percent: float
+    rows: list[MatchRateDeltaRow]
+
+    @property
+    def passed(self) -> bool:
+        required = [row for row in self.rows if row.address_type in ADDRESS_TYPE_ORDER]
+        return bool(required) and all(row.passed for row in required)
+
+
+def extract_match_rates_by_type(
+    table: MatchSummaryTable,
+    endpoint: str | None = None,
+) -> dict[str, float]:
+    rates: dict[str, float] = {}
+    for row in table.rows:
+        if not row.address_type or not row.endpoint:
+            continue
+        if endpoint is not None and row.endpoint != endpoint:
+            continue
+        rates[row.address_type] = row.percentage
+    return rates
+
+
+def compare_match_rates(
+    current: MatchSummaryTable,
+    previous: MatchSummaryTable,
+    *,
+    endpoint: str | None = None,
+    max_delta_percent: float = 1.0,
+) -> MatchRateComparison:
+    current_rates = extract_match_rates_by_type(current, endpoint=endpoint)
+    previous_rates = extract_match_rates_by_type(previous, endpoint=endpoint)
+
+    rows: list[MatchRateDeltaRow] = []
+    for address_type in ADDRESS_TYPE_ORDER:
+        if address_type not in current_rates and address_type not in previous_rates:
+            continue
+        current_pct = current_rates.get(address_type, 0.0)
+        previous_pct = previous_rates.get(address_type, 0.0)
+        delta = current_pct - previous_pct
+        abs_delta = abs(delta)
+        rows.append(
+            MatchRateDeltaRow(
+                address_type=address_type,
+                label=_address_type_label(address_type),
+                current_percentage=current_pct,
+                previous_percentage=previous_pct,
+                delta_percentage=delta,
+                abs_delta_percentage=abs_delta,
+                passed=abs_delta < max_delta_percent,
+            )
+        )
+
+    return MatchRateComparison(
+        current_run_id=current.run_id,
+        previous_run_id=previous.run_id,
+        endpoint=endpoint,
+        max_allowed_delta_percent=max_delta_percent,
+        rows=rows,
+    )
+
+
+def match_rate_comparison_to_dict(comparison: MatchRateComparison) -> dict[str, Any]:
+    return {
+        "current_run_id": comparison.current_run_id,
+        "previous_run_id": comparison.previous_run_id,
+        "endpoint": comparison.endpoint,
+        "max_allowed_delta_percent": comparison.max_allowed_delta_percent,
+        "passed": comparison.passed,
+        "rows": [
+            {
+                "address_type": row.address_type,
+                "label": row.label,
+                "current_percentage": round(row.current_percentage, 2),
+                "previous_percentage": round(row.previous_percentage, 2),
+                "delta_percentage": round(row.delta_percentage, 2),
+                "abs_delta_percentage": round(row.abs_delta_percentage, 2),
+                "passed": row.passed,
+            }
+            for row in comparison.rows
+        ],
+    }
+

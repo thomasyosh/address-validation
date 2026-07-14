@@ -35,7 +35,10 @@ from address_validation.report_writer import ReportWriter, reports_enabled, writ
 from address_validation.summary import (
     MatchSummaryBuilder,
     MatchSummaryTable,
+    MatchRateComparison,
+    compare_match_rates,
     get_endpoint_display_names,
+    match_rate_comparison_to_dict,
     match_summary_to_csv,
     match_summary_to_dict,
 )
@@ -83,6 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--compare-with-previous",
         action="store_true",
         help="Compare this run with the previous routine run",
+    )
+    validate_parser.add_argument(
+        "--max-rate-delta",
+        type=float,
+        metavar="PCT",
+        help=(
+            "With --compare-with-previous: pass when English and Chinese match-rate "
+            "each change by less than PCT percentage points vs previous run (e.g. 1)"
+        ),
     )
     validate_parser.add_argument(
         "--accuracy",
@@ -295,6 +307,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         dest="top_n",
         help="Accept a match if ground truth appears in the top N endpoint results (default: 5).",
+    )
+    compare_parser.add_argument(
+        "--max-rate-delta",
+        type=float,
+        metavar="PCT",
+        help=(
+            "Pass when English and Chinese match-rate each change by less than PCT "
+            "percentage points vs the previous run (e.g. 1 for CI after AI updates)"
+        ),
     )
 
     report_parser = subparsers.add_parser("report", help="Show benchmark performance report")
@@ -513,6 +534,67 @@ def load_dataset_from_config(config: dict[str, Any], override_path: str | None) 
         sheet_name=dataset_settings.get("sheet_name"),
     )
     return dataset_path, records
+
+
+def resolve_max_rate_delta(args: argparse.Namespace, config: dict[str, Any]) -> float | None:
+    cli_value = getattr(args, "max_rate_delta", None)
+    if cli_value is not None:
+        return float(cli_value)
+    config_value = (config.get("comparison") or {}).get("max_match_rate_delta_percent")
+    if config_value is not None:
+        return float(config_value)
+    return None
+
+
+def build_match_rate_comparison(
+    database: Database,
+    settings: Any,
+    config: dict[str, Any],
+    current_run_id: int,
+    previous_run_id: int,
+    *,
+    max_delta: float,
+    endpoint: str | None = None,
+) -> MatchRateComparison:
+    builder = MatchSummaryBuilder(
+        database,
+        settings,
+        get_endpoint_display_names(config),
+    )
+    current_table = builder.build(current_run_id)
+    previous_table = builder.build(previous_run_id)
+    return compare_match_rates(
+        current_table,
+        previous_table,
+        endpoint=endpoint,
+        max_delta_percent=max_delta,
+    )
+
+
+def print_match_rate_comparison(comparison: MatchRateComparison) -> None:
+    print(
+        f"Match-rate comparison: run {comparison.current_run_id} vs "
+        f"run {comparison.previous_run_id}"
+    )
+    if comparison.endpoint:
+        print(f"Endpoint: {comparison.endpoint}")
+    print(
+        f"Acceptance: each language changes by less than "
+        f"{comparison.max_allowed_delta_percent:g} percentage points"
+    )
+    print(f"Overall: {'PASS' if comparison.passed else 'FAIL'}")
+    print("")
+    print(f"{'Language':<10} {'Previous':>10} {'Current':>10} {'Delta':>10} {'|Delta|':>10} {'Result':>8}")
+    print("-" * 62)
+    for row in comparison.rows:
+        print(
+            f"{row.label:<10} "
+            f"{row.previous_percentage:>9.2f}% "
+            f"{row.current_percentage:>9.2f}% "
+            f"{row.delta_percentage:>+9.2f}% "
+            f"{row.abs_delta_percentage:>9.2f}% "
+            f"{'PASS' if row.passed else 'FAIL':>8}"
+        )
 
 
 def print_validation_summary(run_id: int, summaries: list[dict[str, Any]], criteria: str) -> None:
@@ -861,6 +943,7 @@ def handle_validate(args: argparse.Namespace, config: dict[str, Any], database: 
             exit_code = 1
 
     compare_with_run_id = None
+    max_rate_delta = resolve_max_rate_delta(args, config)
     if args.compare_with_previous:
         comparator = RoutineComparator(database, settings)
         previous_run_id = database.get_previous_run_id(run_id, run_type="routine")
@@ -871,7 +954,22 @@ def handle_validate(args: argparse.Namespace, config: dict[str, Any], database: 
             match_diff = comparator.compare_match_status(run_id, previous_run_id)
             print()
             print_match_status_comparison(match_diff)
-            if match_diff.has_differences:
+            if max_rate_delta is not None:
+                current_run = database.get_run(run_id)
+                rate_comparison = build_match_rate_comparison(
+                    database,
+                    settings,
+                    config,
+                    run_id,
+                    previous_run_id,
+                    max_delta=max_rate_delta,
+                    endpoint=current_run.endpoint_name if current_run else None,
+                )
+                print()
+                print_match_rate_comparison(rate_comparison)
+                if not rate_comparison.passed:
+                    exit_code = 1
+            elif match_diff.has_differences:
                 exit_code = 1
 
     write_auto_report(
@@ -1046,21 +1144,37 @@ def handle_compare(args: argparse.Namespace, config: dict[str, Any], database: D
         return 1
 
     match_diff = comparator.compare_match_status(current_run_id, previous_run_id)
+    max_rate_delta = resolve_max_rate_delta(args, config)
+    current_run = database.get_run(current_run_id)
+    rate_comparison = None
+    if max_rate_delta is not None:
+        rate_comparison = build_match_rate_comparison(
+            database,
+            settings,
+            config,
+            current_run_id,
+            previous_run_id,
+            max_delta=max_rate_delta,
+            endpoint=current_run.endpoint_name if current_run else None,
+        )
 
     if args.json:
         payload: dict[str, Any] = {
             "match_status": match_status_comparison_to_dict(match_diff),
         }
+        if rate_comparison is not None:
+            payload["match_rate"] = match_rate_comparison_to_dict(rate_comparison)
         if args.value_diff:
-            current_run = database.get_run(current_run_id)
             if current_run and current_run.run_type == "routine":
                 value_diff = comparator.compare_runs(current_run_id, previous_run_id)
                 payload["value_diff"] = routine_comparison_to_dict(value_diff)
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print_match_status_comparison(match_diff)
+        if rate_comparison is not None:
+            print()
+            print_match_rate_comparison(rate_comparison)
         if args.value_diff:
-            current_run = database.get_run(current_run_id)
             if current_run and current_run.run_type == "routine":
                 print()
                 print_routine_comparison(comparator.compare_runs(current_run_id, previous_run_id))
@@ -1075,6 +1189,8 @@ def handle_compare(args: argparse.Namespace, config: dict[str, Any], database: D
         )
         print(f"\nReport folder: {written.directory.resolve()}")
 
+    if rate_comparison is not None:
+        return 0 if rate_comparison.passed else 1
     return 1 if match_diff.has_differences else 0
 
 
