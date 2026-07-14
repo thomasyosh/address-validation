@@ -643,7 +643,12 @@ def run_jobs_concurrently(
         log_info(
             f"Route {endpoint_name}: "
             f"{fetcher.describe_route(sample_endpoint['url'], force_direct=bool(sample_endpoint.get('force_direct')))}, "
-            f"RPS={rps_label}, max_workers={endpoint_max_workers}, {mode_label}"
+            f"RPS={rps_label}, max_in_flight={endpoint_max_workers}, {mode_label}"
+        )
+        log_info(
+            f"Parallelism cap for {endpoint_name}: up to {min(endpoint_max_workers, len(units))} "
+            f"simultaneous HTTP calls (watch Progress ... http/s — low http/s usually means ASE is slow, "
+            f"not that the client is idle)"
         )
         for warning in concurrency_config_warnings(sample_endpoint, worker_count):
             log_warn(warning)
