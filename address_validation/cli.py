@@ -31,7 +31,7 @@ from address_validation.dataset import get_dataset_settings, load_address_datase
 from address_validation.fetcher import AddressFetcher, BenchmarkRunner, RoutineRunner
 from address_validation.logging_utils import log_info, log_warn
 from address_validation.proxy import get_proxy_settings
-from address_validation.report_writer import ReportWriter, reports_enabled
+from address_validation.report_writer import ReportWriter, reports_enabled, write_csv_content
 from address_validation.summary import (
     MatchSummaryBuilder,
     MatchSummaryTable,
@@ -1129,7 +1129,7 @@ def handle_summary(args: argparse.Namespace, config: dict[str, Any], database: D
     ).build(run_id)
 
     if args.csv:
-        Path(args.csv).write_text(match_summary_to_csv(table), encoding="utf-8")
+        write_csv_content(Path(args.csv), match_summary_to_csv(table))
         print(f"Wrote summary CSV to {args.csv}")
 
     if args.json:

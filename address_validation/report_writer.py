@@ -48,6 +48,15 @@ def reports_enabled(config: dict[str, Any]) -> bool:
     return bool(reports.get("auto_write", True))
 
 
+# Excel on Windows often misreads UTF-8 CSV without a BOM (Chinese shows as "?").
+CSV_EXCEL_ENCODING = "utf-8-sig"
+
+
+def write_csv_content(path: Path, content: str) -> Path:
+    path.write_text(content, encoding=CSV_EXCEL_ENCODING)
+    return path
+
+
 class ReportWriter:
     """Write durable human/machine-readable reports after every run."""
 
@@ -86,7 +95,7 @@ class ReportWriter:
         ).build(run_id)
 
         files.append(self._write_text(folder / "summary.txt", self._summary_text(summary, accuracy, run)))
-        files.append(self._write_text(folder / "summary.csv", match_summary_to_csv(summary)))
+        files.append(self._write_csv(folder / "summary.csv", match_summary_to_csv(summary)))
         files.append(
             self._write_json(
                 folder / "summary.json",
@@ -105,7 +114,7 @@ class ReportWriter:
             )
         )
         files.append(self._write_json(folder / "accuracy.json", accuracy_report_to_dict(accuracy)))
-        files.append(self._write_text(folder / "mismatches.csv", self._mismatches_csv(accuracy)))
+        files.append(self._write_csv(folder / "mismatches.csv", self._mismatches_csv(accuracy)))
 
         if run.run_type == "benchmark":
             baseline_endpoint, _ = get_benchmark_endpoints(self.config)
@@ -134,7 +143,7 @@ class ReportWriter:
                 )
             )
             files.append(
-                self._write_text(folder / "match_diff.csv", self._match_diff_csv(match_diff))
+                self._write_csv(folder / "match_diff.csv", self._match_diff_csv(match_diff))
             )
             files.append(
                 self._write_text(folder / "match_diff.txt", self._match_diff_text(match_diff))
@@ -415,6 +424,10 @@ class ReportWriter:
     def _write_text(path: Path, content: str) -> Path:
         path.write_text(content, encoding="utf-8")
         return path
+
+    @staticmethod
+    def _write_csv(path: Path, content: str) -> Path:
+        return write_csv_content(path, content)
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, Any]) -> Path:

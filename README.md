@@ -85,6 +85,21 @@ results/
 
 Open `results/LATEST.txt` to jump to the newest report, or browse `results/run_*`.
 
+CSV files (`summary.csv`, `mismatches.csv`, `match_diff.csv`) are written as **UTF-8 with BOM** so Excel on Windows shows Chinese addresses (CADDRESS) correctly.
+
+### Regenerate reports from SQLite
+
+Fetch results stay in `data/address_validation.db`. To rebuild the `results/` folder for an old run (e.g. after fixing CSV encoding):
+
+```powershell
+python main.py list-runs
+python main.py write-report          # latest run
+python main.py write-report 12       # specific run ID
+python main.py write-report 12 --compare-with 8
+```
+
+This rewrites `summary.*`, `mismatches.csv`, `match_diff.*`, etc. from the database without re-fetching addresses.
+
 Raw fetch data also stays in SQLite (`data/address_validation.db`) so you can re-compare later.
 
 ## What “difference” means
