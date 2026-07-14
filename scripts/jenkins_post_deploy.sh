@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Invoked as: bash scripts/jenkins_post_deploy.sh
 # Uses bash (not POSIX sh). Do not run with sh.
-# Script version: 2026-07-14e (pip bootstrap for agents without python3-pip)
+# Script version: 2026-07-14f (get-pip bootstrap when ensurepip missing)
 
 set -eu
 
 echo "========================================================"
-echo "Address Search Validation (jenkins_post_deploy.sh 2026-07-14e)"
+echo "Address Search Validation (jenkins_post_deploy.sh 2026-07-14f)"
 echo "========================================================"
 
 DATASET_FILENAME="address.xlsx"
@@ -170,29 +170,85 @@ fi
 _setup_python() {
     local venv_dir="$WORKSPACE_DIR/.venv"
     local pydeps="$WORKSPACE_DIR/.pydeps"
+    local py pip_cmd get_pip
+
+    _python_has_deps() {
+        "$1" -c "import httpx, openpyxl, yaml" 2>/dev/null
+    }
+
+    _pip_install_reqs() {
+        local py="$1"
+        "$py" -m pip install -r requirements.txt -q \
+            --trusted-host pypi.org \
+            --trusted-host files.pythonhosted.org
+    }
+
+    _pip_install_reqs_user() {
+        local py="$1"
+        "$py" -m pip install -r requirements.txt -q --user \
+            --trusted-host pypi.org \
+            --trusted-host files.pythonhosted.org
+    }
+
+    _bootstrap_get_pip() {
+        py="$1"
+        get_pip="$TMPDIR/get-pip.py"
+        if [ -f "$REPO_DIR/scripts/get-pip.py" ]; then
+            get_pip="$REPO_DIR/scripts/get-pip.py"
+        elif [ ! -f "$get_pip" ]; then
+            echo "Downloading get-pip.py (bootstrap pip without python3-pip package) ..."
+            curl -fsSL https://bootstrap.pypa.io/get-pip.py -o "$get_pip"
+        fi
+        "$py" "$get_pip" --no-warn-script-location
+        "$py" -m pip --version >/dev/null 2>&1
+    }
+
+    # System Python already has dependencies (e.g. admin installed rpms).
+    if _python_has_deps python3; then
+        PYTHON="python3"
+        echo "Python: $(python3 --version) (system packages already installed)"
+        return 0
+    fi
 
     if [ ! -x "$venv_dir/bin/python" ]; then
         echo "Creating Python venv in $venv_dir ..."
         if ! python3 -m venv "$venv_dir" 2>/dev/null; then
             echo "WARNING: python3 -m venv failed; trying --without-pip ..."
-            python3 -m venv --without-pip "$venv_dir"
+            python3 -m venv --without-pip "$venv_dir" 2>/dev/null \
+                || python3 -m venv --without-pip --system-site-packages "$venv_dir"
         fi
     fi
 
+    py="$venv_dir/bin/python"
+
     if [ -x "$venv_dir/bin/pip" ]; then
-        "$venv_dir/bin/pip" install -r requirements.txt -q
-        PYTHON="$venv_dir/bin/python"
-        echo "Python: $($PYTHON --version) (venv + pip at $venv_dir)"
+        "$venv_dir/bin/pip" install -r requirements.txt -q \
+            --trusted-host pypi.org --trusted-host files.pythonhosted.org
+        PYTHON="$py"
+        echo "Python: $($PYTHON --version) (venv + pip)"
         return 0
     fi
 
-    if [ -x "$venv_dir/bin/python" ]; then
-        echo "Bootstrapping pip inside venv via ensurepip ..."
-        if "$venv_dir/bin/python" -m ensurepip --upgrade 2>/dev/null \
-            && [ -x "$venv_dir/bin/pip" ]; then
-            "$venv_dir/bin/pip" install -r requirements.txt -q
-            PYTHON="$venv_dir/bin/python"
-            echo "Python: $($PYTHON --version) (venv + ensurepip at $venv_dir)"
+    if [ -x "$py" ] && "$py" -m pip --version >/dev/null 2>&1; then
+        _pip_install_reqs "$py"
+        PYTHON="$py"
+        echo "Python: $($PYTHON --version) (venv + python -m pip)"
+        return 0
+    fi
+
+    if [ -x "$py" ]; then
+        echo "Bootstrapping pip in venv via ensurepip ..."
+        if "$py" -m ensurepip --upgrade 2>/dev/null && "$py" -m pip --version >/dev/null 2>&1; then
+            _pip_install_reqs "$py"
+            PYTHON="$py"
+            echo "Python: $($PYTHON --version) (venv + ensurepip)"
+            return 0
+        fi
+        echo "ensurepip unavailable; trying get-pip.py ..."
+        if _bootstrap_get_pip "$py"; then
+            _pip_install_reqs "$py"
+            PYTHON="$py"
+            echo "Python: $($PYTHON --version) (venv + get-pip.py)"
             return 0
         fi
     fi
@@ -200,26 +256,26 @@ _setup_python() {
     if command -v pip3 >/dev/null 2>&1; then
         echo "Using system pip3 with --target $pydeps ..."
         mkdir -p "$pydeps"
-        pip3 install -r requirements.txt -q --target "$pydeps"
+        pip3 install -r requirements.txt -q --target "$pydeps" \
+            --trusted-host pypi.org --trusted-host files.pythonhosted.org
         PYTHON="python3"
         export PYTHONPATH="$pydeps${PYTHONPATH:+:$PYTHONPATH}"
         echo "Python: $(python3 --version) (pip3 --target)"
         return 0
     fi
 
-    echo "Bootstrapping pip via python3 -m ensurepip --user ..."
-    if python3 -m ensurepip --user --upgrade 2>/dev/null \
-        && python3 -m pip --version >/dev/null 2>&1; then
-        python3 -m pip install -r requirements.txt -q --user
+    echo "Bootstrapping pip for system python3 via get-pip.py ..."
+    if _bootstrap_get_pip python3; then
+        _pip_install_reqs_user python3
         PYTHON="python3"
-        echo "Python: $(python3 --version) (ensurepip --user)"
+        echo "Python: $(python3 --version) (get-pip.py --user)"
         return 0
     fi
 
-    echo "ERROR: No pip on this Jenkins agent."
-    echo "  Ask your Jenkins admin to install: python3-pip (or python3-venv + python3-pip)"
-    echo "  RHEL/CentOS: sudo yum install python3-pip python3-venv"
-    echo "  Debian/Ubuntu: sudo apt install python3-pip python3-venv"
+    echo "ERROR: Could not install Python dependencies on this Jenkins agent."
+    echo "  python3 exists but pip/ensurepip/get-pip all failed."
+    echo "  Ask admin: yum install python3-pip python3-venv   (or apt equivalent)"
+    echo "  Or allow outbound HTTPS to bootstrap.pypa.io and pypi.org through the proxy."
     exit 1
 }
 

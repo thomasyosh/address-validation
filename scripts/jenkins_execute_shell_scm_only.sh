@@ -30,7 +30,8 @@ export NO_PROXY="${NO_PROXY:-ase.testingaddress.com,10.77.242.157,10.0.0.0/8,loc
 
 _ensure_repo_in_workspace() {
   if [ -f "${WORKSPACE}/scripts/jenkins_post_deploy.sh" ]; then
-    if grep -q '2026-07-14e' "${WORKSPACE}/scripts/jenkins_post_deploy.sh" 2>/dev/null \
+    if grep -q '2026-07-14f' "${WORKSPACE}/scripts/jenkins_post_deploy.sh" 2>/dev/null \
+        || grep -q '2026-07-14e' "${WORKSPACE}/scripts/jenkins_post_deploy.sh" 2>/dev/null \
         || grep -q '2026-07-14d' "${WORKSPACE}/scripts/jenkins_post_deploy.sh" 2>/dev/null; then
       echo "Git SCM checkout OK (scripts/jenkins_post_deploy.sh found)."
       return 0

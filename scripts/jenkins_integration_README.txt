@@ -1,10 +1,27 @@
-Jenkins — SCM + File Upload setup
+Jenkins deployment
+==================
 
-=================================
+RECOMMENDED — Docker (scripts/jenkins_execute_shell_docker.sh)
+--------------------------------------------------------------
+  Avoids python3-pip / venv issues on the Jenkins agent. Same pattern as other
+  Docker jobs on your server.
+
+  1. Git SCM → GitLab, branch */main
+  2. Build → Execute shell → paste scripts/jenkins_execute_shell_docker.sh
+  3. Optional File Parameters (one-time): address_xlsx, config_yaml, config_local_yaml
+  4. Build with Parameters once to upload files; later builds reuse /tmp/.../data
+  5. Post-build: Archive artifacts → results/**
+
+  Requires: docker command on Jenkins agent (ask colleague).
 
 
+LEGACY — Shell on agent (scripts/jenkins_execute_shell_scm_only.sh)
+-------------------------------------------------------------------
+  Use only if Docker is not available on the agent.
 
-Use Git SCM for source code. Upload data + config files via File Parameters.
+
+Jenkins — SCM + File Upload setup (shell / Docker bootstrap)
+============================================================
 
 
 
@@ -250,11 +267,13 @@ Troubleshooting
 
   /usr/bin/python3: No module named pip
 
-    → Jenkins agent missing python3-pip (fixed in 2026-07-14e via ensurepip / pip3 fallbacks).
+    → Agent has python3 but not python3-pip (fixed in 2026-07-14f via get-pip.py download).
 
-    → Push latest scripts; console should show "Bootstrapping pip" or "pip3 --target".
+    → Push to GitLab; console should show "Downloading get-pip.py" then "venv + get-pip.py".
 
-    → If still fails, ask admin: yum install python3-pip python3-venv
+    → Jenkins agent needs HTTPS to bootstrap.pypa.io and pypi.org (via smoproxy).
+
+    → If download blocked, ask admin: yum install python3-pip python3-venv
 
 
 

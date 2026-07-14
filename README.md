@@ -152,7 +152,7 @@ The first validation run has no previous run to compare — establish a baseline
 
 1. **Create a GitLab project** and push this repository (see `scripts/jenkins_integration_README.txt`).
 
-2. **Jenkins Execute shell** — paste `scripts/jenkins_execute_shell_full.sh` with **Git SCM** configured (recommended). **Do not** reference a server path to `.sh` before checkout. Do not set `ADDRESS_VALIDATION_HOME=/var/jenkins`.
+2. **Jenkins Execute shell** — paste `scripts/jenkins_execute_shell_docker.sh` (recommended if the agent has Docker), or `scripts/jenkins_execute_shell_scm_only.sh` without Docker. Use **Git SCM**. Do not set `ADDRESS_VALIDATION_HOME=/var/jenkins`.
 
 3. **Persistent data** is created automatically under `$HOME/address-validation-data/` (writable on most agents). Optional one-time copy there:
    - `config.yaml`
