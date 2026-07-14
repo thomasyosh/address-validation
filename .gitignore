@@ -6,5 +6,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 config.yaml
+!jenkins/config.yaml
 config.local.yaml
 query_debug.json

@@ -1,68 +1,264 @@
-How to add Address Search Validation to Jenkins job
-====================================================
+Jenkins — SCM + File Upload setup
 
-Your colleague's job (deploy-uat-opensearch-data-bldg-street) currently runs a shell
-script that uploads building/street data to OpenSearch UAT via Docker.
-
-Add address validation as a NEW block at the END of that same "Execute shell" step,
-OR as a second "Execute shell" build step.
-
-You do NOT upload folders through the Jenkins Workspace / Changes tabs.
-Jenkins runs commands; git clone downloads your app automatically.
+=================================
 
 
-STEP 1 — One-time setup on the Jenkins server (ask colleague / admin)
----------------------------------------------------------------------
-1. Create a persistent folder (survives workspace wipe between builds):
-     /var/jenkins/address-validation/data/
 
-2. Copy the test Excel file there:
-     /var/jenkins/address-validation/data/addresses.xlsx
-
-3. Clone the repo once and create config.yaml (use your team's Git URL):
-     export ADDRESS_VALIDATION_GIT_URL='<your-internal-git-url>'
-     git clone "$ADDRESS_VALIDATION_GIT_URL" /var/jenkins/address-validation/repo
-     cd /var/jenkins/address-validation/repo
-     cp config.example.yaml config.yaml
-     # Edit config.yaml: ASE URL, host_header, etc. (same as your PC)
-
-4. Ensure Python 3.10+ and git are installed on the Jenkins agent.
+Use Git SCM for source code. Upload data + config files via File Parameters.
 
 
-STEP 2 — Edit the Jenkins job (GUI)
------------------------------------
-1. Open Jenkins → folder PROD → job deploy-uat-opensearch-data-bldg-street
-2. Click "Configure" (left menu)
-3. Scroll to "Build" or "Build Steps"
-4. Find "Execute shell" (the script in jenkins.txt)
-5. AFTER the existing docker/opensearch block, append the contents of:
-     scripts/jenkins_post_deploy.sh
-   Or add a second "Execute shell" step with that script.
-
-6. Save.
 
 
-STEP 3 — What happens on each build (#45, #46, ...)
---------------------------------------------------
-1. Existing step: upload data to OpenSearch UAT (unchanged)
-2. New step: git pull address-validation repo
-3. Run: python main.py validate --compare-with-previous --max-rate-delta 1
-4. If English or Chinese match-rate moved by >= 1 percentage point → build FAILS (red X)
-5. If OK → build PASS (green tick)
+
+STEP 1 — Push repo to GitLab
+
+----------------------------
+
+  git push your repo to company GitLab (branch main)
 
 
-STEP 4 — Where to look when a build fails
------------------------------------------
-- Build #N → "Console Output" → search for "Address Search Validation"
-- Reports on agent: /var/jenkins/address-validation/repo/results/
-- SQLite history: /var/jenkins/address-validation/address_validation.db
 
 
-Git repo (for your colleague)
+
+STEP 2 — Jenkins job: File Parameters (upload button)
+
+-----------------------------------------------------
+
+  Job → Configure → General → check "This project is parameterized"
+
+
+
+  Add Parameter → File Parameter (three times):
+
+
+
+  | Parameter Name     | File Location | You upload from PC   |
+  |--------------------|---------------|----------------------|
+  | address_xlsx       | (leave blank) | data/address.xlsx    |
+  | config_yaml        | (leave blank) | config.yaml          |
+  | config_local_yaml  | (leave blank) | config.local.yaml    |
+
+  File Location = path under $WORKSPACE where Jenkins saves the upload.
+  Leave it BLANK for all three — Jenkins saves as address_xlsx, config_yaml,
+  config_local_yaml in the workspace root (our script finds these).
+
+  Optional — use real paths instead of blank File Location:
+    address_xlsx      → data/address.xlsx
+    config_yaml       → config.yaml
+    config_local_yaml → config.local.yaml
+
+
+
+  Save the job.
+
+
+
+  IMPORTANT: Use "Build with Parameters" (not plain "Build Now") so the
+
+  upload buttons appear. Jenkins saves uploaded files in Workspace as:
+
+    $WORKSPACE/address_xlsx
+
+    $WORKSPACE/config_yaml
+
+    $WORKSPACE/config_local_yaml
+
+  (Jenkins uses the parameter name, not your original filename.)
+
+
+ONE-TIME UPLOAD — colleagues do NOT re-upload every build
+---------------------------------------------------------
+  The script COPIES uploads to a persistent folder on the Jenkins agent:
+    /tmp/address-validation-data-<jobname>/
+      config.yaml
+      config.local.yaml
+      data/address.xlsx
+      address_validation.db
+
+  Build #1: upload all 3 files (Build with Parameters).
+  Build #2+: script reuses saved copies — no new upload required.
+
+  Annoying Jenkins UI? After the first successful build you can:
+    A) Remove the 3 File Parameters from the job (recommended for colleagues)
+       → plain "Build Now" works; files already on the agent.
+    B) Keep parameters but colleagues click Build with Parameters and leave
+       uploads empty / skip — saved files are still used if present.
+    C) Avoid uploads entirely:
+       - config: commit jenkins/config.yaml to private GitLab
+       - proxy: commit jenkins/config.local.yaml OR set proxy in Execute shell
+       - Excel: export ADDRESSES_XLSX_URL='https://internal/address.xlsx'
+
+  Re-upload only when config or dataset changes.
+
+STEP 3 — Jenkins job: Git SCM
+
 -----------------------------
-Use your organisation's internal Git URL. Set it once on the Jenkins agent:
 
-  export ADDRESS_VALIDATION_GIT_URL='<your-internal-git-url>'
+  Source Code Management → Git
 
-The post-deploy script reads ADDRESS_VALIDATION_GIT_URL on first clone.
-After that, git pull uses the remote already configured in $VALIDATION_REPO.
+    Repository URL: <your-gitlab-clone-url>
+
+    Credentials: GitLab token or SSH key
+
+    Branch Specifier: */main
+
+
+
+  Do NOT enable "Checkout to subdirectory: address-validation".
+
+
+
+
+
+STEP 4 — Jenkins job: Execute shell
+
+-----------------------------------
+
+  Build → Execute shell
+
+  Paste the ENTIRE file: scripts/jenkins_execute_shell_scm_only.sh
+
+  (First line must be #!/bin/bash)
+
+
+
+  Do NOT add extra mkdir or clone commands from other jobs.
+
+  Do NOT set ADDRESS_VALIDATION_HOME=/var/jenkins anywhere.
+
+
+
+
+
+STEP 5 — Build with Parameters
+
+------------------------------
+
+  1. Click "Build with Parameters"
+
+  2. Upload address_xlsx  → choose your data/address.xlsx
+
+  3. Upload config_yaml   → choose your config.yaml
+
+  4. Upload config_local_yaml → choose your config.local.yaml (proxy)
+
+  5. Click Build
+
+
+
+  First build: creates baseline in /tmp/address-validation-data-<jobname>/
+
+  Later builds: re-upload only when files change; otherwise prior copies are reused.
+
+
+
+
+
+Console output — success looks like
+
+-----------------------------------
+
+  Address Search Validation (jenkins_post_deploy.sh 2026-07-14c)
+
+  Persist directory OK: /tmp/address-validation-data-your-job
+
+  Installed config.yaml from upload: .../config_yaml
+
+  Installed config.local.yaml from upload: .../config_local_yaml
+
+  Installed dataset from: .../address_xlsx
+
+  Starting validate ...
+
+
+
+
+
+Where files live
+
+----------------
+
+  Workspace (git checkout):  $WORKSPACE/main.py, scripts/, results/
+
+  Uploaded copies (persist):   /tmp/address-validation-data-<jobname>/
+
+    config.yaml
+
+    config.local.yaml
+
+    data/address.xlsx
+
+    address_validation.db
+
+
+
+
+
+Troubleshooting
+
+---------------
+
+
+
+  mkdir: cannot create directory 'var/jenkins' or '/var/lib/jenkins'
+
+    → Often pip install using HOME=/var/lib/jenkins (fixed in 2026-07-14d via /tmp + venv).
+
+    → Or extra shell lines copied from another job (mkdir ...).
+
+    → Remove global/job env ADDRESS_VALIDATION_HOME if set.
+
+    → Execute shell = ONLY jenkins_execute_shell_scm_only.sh (no other lines).
+
+    → Console must show "2026-07-14d" and "HOME redirected to: /tmp/jenkins-home-...".
+
+    → Push latest scripts to GitLab and rebuild.
+
+
+
+  ERROR: Set ADDRESS_VALIDATION_GIT_URL ... clone manually to .../repo
+
+    → OLD Execute shell still in the job (outdated jenkins_post_deploy pasted inline).
+
+    → Delete ALL Execute shell text. Paste ONLY jenkins_execute_shell_scm_only.sh.
+
+    → Edit GIT_URL at the top of that file if Git SCM is not configured.
+
+
+
+  Couldn't find any revision to build
+
+    → GitLab empty or wrong branch. Push main, set Branch */main, fix credentials.
+
+    → Or edit GIT_URL in jenkins_execute_shell_scm_only.sh (fallback git clone).
+
+
+
+  Missing address.xlsx
+
+    → Use "Build with Parameters" and upload address_xlsx.
+
+    → Parameter name must be exactly: address_xlsx
+
+
+
+  Missing config
+
+    → Upload config_yaml parameter, or commit jenkins/config.yaml to GitLab.
+
+
+
+  /usr/bin/python3: No module named pip
+
+    → Jenkins agent missing python3-pip (fixed in 2026-07-14e via ensurepip / pip3 fallbacks).
+
+    → Push latest scripts; console should show "Bootstrapping pip" or "pip3 --target".
+
+    → If still fails, ask admin: yum install python3-pip python3-venv
+
+
+
+  Double address-validation folder
+
+    → Remove Git "Checkout to subdirectory". Use SCM-only execute shell.
+
