@@ -38,6 +38,14 @@ fi
 
 bash "${WORKSPACE}/scripts/jenkins_docker_bootstrap.sh"
 
+if [ ! -f "${PERSIST}/config.yaml" ] || [ ! -f "${PERSIST}/address.xlsx" ]; then
+  echo "ERROR: Bootstrap did not populate ${PERSIST} — see messages above."
+  exit 1
+fi
+
+echo "Pre-docker persist check OK:"
+ls -la "${PERSIST}/"
+
 echo "Building Docker image: $IMAGE_NAME ..."
 docker build \
   --build-arg "HTTP_PROXY=${HTTP_PROXY}" \
@@ -45,6 +53,9 @@ docker build \
   --build-arg "NO_PROXY=${NO_PROXY}" \
   -t "$IMAGE_NAME" \
   "${WORKSPACE}"
+
+# :z helps SELinux agents (RHEL) mount host dirs into Docker
+DOCKER_VOL_OPTS="${DOCKER_VOL_OPTS:-:z}"
 
 echo "Running validation in container ..."
 docker run --rm \
@@ -54,8 +65,8 @@ docker run --rm \
   -e "HTTPS_PROXY=${HTTPS_PROXY}" \
   -e "NO_PROXY=${NO_PROXY}" \
   -e "PYTHONUNBUFFERED=1" \
-  -v "${PERSIST}:/data" \
-  -v "${WORKSPACE}/results:/app/results" \
+  -v "${PERSIST}:/data${DOCKER_VOL_OPTS}" \
+  -v "${WORKSPACE}/results:/app/results${DOCKER_VOL_OPTS}" \
   "$IMAGE_NAME" \
   "${JENKINS_VALIDATE_ARGS[@]}"
 

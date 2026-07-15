@@ -17,14 +17,17 @@ if [ -f "${DATA_DIR}/config.yaml" ]; then
     echo "Using config: ${DATA_DIR}/config.yaml"
 elif [ -f config.example.yaml ]; then
     cp config.example.yaml config.yaml
-    echo "WARNING: using config.example.yaml (no ${DATA_DIR}/config.yaml)"
+    echo "WARNING: ${DATA_DIR}/config.yaml missing — using config.example.yaml from image"
+    echo "  Fix: ensure jenkins_docker_bootstrap.sh copied workspace config to ${DATA_DIR}/"
 else
     echo "ERROR: Missing ${DATA_DIR}/config.yaml"
+    ls -la "${DATA_DIR}/" 2>/dev/null || echo "(cannot list ${DATA_DIR})"
     exit 1
 fi
 
 if [ ! -f "$DATASET_PATH" ]; then
     echo "ERROR: Missing dataset at $DATASET_PATH"
+    ls -la "${DATA_DIR}/" 2>/dev/null || echo "(cannot list ${DATA_DIR})"
     exit 1
 fi
 echo "Dataset: $DATASET_PATH"
