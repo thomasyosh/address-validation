@@ -15,6 +15,36 @@ RECOMMENDED — Docker (scripts/jenkins_execute_shell_docker.sh)
   Requires: docker command on Jenkins agent (ask colleague).
 
 
+ASE query_debug — 8GB RAM (batch + single-thread)
+-------------------------------------------------
+  Jenkins Docker/shell jobs use scripts/jenkins_validate_args.sh:
+
+    --fetch-mode batch
+    --concurrency single-thread
+    --batch-size 25          (override: export ASE_BATCH_SIZE=10)
+    --no-auto-parallel-batches
+    --sequential --rps 2     (override: export ASE_RPS=1)
+
+  One HTTP request at a time; each request sends up to 25 addresses in the
+  json_array body. Gentle on the ASE server. Tune ASE_BATCH_SIZE down if OOM.
+
+
+SQLite during fetch (is no DB output normal?)
+---------------------------------------------
+  YES — expected behaviour on long Jenkins runs:
+
+  - DB path: /tmp/address-validation-data-<job>/address_validation.db
+    (NOT in $WORKSPACE — Workspace browser will not show it)
+  - File is created when validate starts (empty schema + runs table)
+  - Rows are written in batches every 50 addresses (performance.batch_save_size)
+  - Console progress logs every 50 rows (performance.progress_every)
+  - With ~40k addresses, you may wait several minutes before the first log line
+  - Reports (CSV) appear in $WORKSPACE/results/ only AFTER the run completes
+
+  To see earlier progress: add -v to validate args (very verbose) or lower
+  progress_every in your uploaded config.yaml.
+
+
 LEGACY — Shell on agent (scripts/jenkins_execute_shell_scm_only.sh)
 -------------------------------------------------------------------
   Use only if Docker is not available on the agent.

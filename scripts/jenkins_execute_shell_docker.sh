@@ -26,6 +26,11 @@ PERSIST="/tmp/address-validation-data-${JOB_NAME:-jenkins}"
 export ADDRESS_VALIDATION_HOME="$PERSIST"
 mkdir -p "$PERSIST" "${WORKSPACE}/results"
 
+# Gentle ASE profile: batch requests, single client thread (see scripts/jenkins_validate_args.sh)
+source "${WORKSPACE}/scripts/jenkins_validate_args.sh"
+echo "ASE fetch profile: batch_size=${ASE_BATCH_SIZE} concurrency=single-thread rps=${ASE_RPS}"
+echo "SQLite DB (grows during fetch): ${PERSIST}/address_validation.db"
+
 if [ ! -f "${WORKSPACE}/Dockerfile" ]; then
   echo "ERROR: ${WORKSPACE}/Dockerfile not found — Git SCM did not checkout the repo."
   exit 1
@@ -48,13 +53,11 @@ docker run --rm \
   -e "HTTP_PROXY=${HTTP_PROXY}" \
   -e "HTTPS_PROXY=${HTTPS_PROXY}" \
   -e "NO_PROXY=${NO_PROXY}" \
+  -e "PYTHONUNBUFFERED=1" \
   -v "${PERSIST}:/data" \
   -v "${WORKSPACE}/results:/app/results" \
   "$IMAGE_NAME" \
-  validate \
-    --compare-with-previous \
-    --max-rate-delta 1 \
-    --label "jenkins-build-${BUILD_NUMBER:-manual}"
+  "${JENKINS_VALIDATE_ARGS[@]}"
 
 echo "========================================================"
 echo "Address validation PASSED (Docker)"

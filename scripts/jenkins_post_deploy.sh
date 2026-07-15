@@ -391,11 +391,13 @@ export http_proxy="${http_proxy:-http://smoproxy:8080/}"
 export https_proxy="${https_proxy:-http://smoproxy:8080/}"
 export NO_PROXY="${NO_PROXY:-ase.testingaddress.com,10.77.242.157,10.0.0.0/8,localhost,127.0.0.1}"
 
-echo "Starting validate (fetch + compare-with-previous, max-rate-delta 1%)..."
-"$PYTHON" main.py validate \
-    --compare-with-previous \
-    --max-rate-delta 1 \
-    --label "jenkins-build-${BUILD_NUMBER:-manual}"
+# shellcheck source=jenkins_validate_args.sh
+source "$REPO_DIR/scripts/jenkins_validate_args.sh"
+echo "ASE fetch profile: batch_size=${ASE_BATCH_SIZE} concurrency=single-thread rps=${ASE_RPS}"
+echo "SQLite DB (grows during fetch): $VALIDATION_DB"
+
+echo "Starting validate ..."
+"${PYTHON}" main.py "${JENKINS_VALIDATE_ARGS[@]}"
 
 echo "========================================================"
 echo "Address validation PASSED"

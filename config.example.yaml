@@ -89,13 +89,11 @@ endpoints:
     request:
       address_in: json_array
       address_key: address
-      # Fetch profile presets:
-      #   fetch_mode: one,  concurrency: multi-thread   — parallel one-address HTTP calls
-      #   fetch_mode: one,  concurrency: single-thread — one address per call, serial
-      #   fetch_mode: batch, concurrency: single-thread, batch_size: N — array body, serial
-      fetch_mode: one
+      # ASE query_debug has limited RAM (~8GB). Prefer batch + single-thread in CI:
+      #   fetch_mode: batch, concurrency: single-thread, auto_parallel_batches: false
+      fetch_mode: batch
       concurrency: single-thread
-      batch_size: 50
+      batch_size: 25
       auto_parallel_batches: false
       timeout_seconds: 120
     response:

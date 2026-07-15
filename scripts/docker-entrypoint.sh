@@ -55,5 +55,7 @@ print("Wrote /app/config.local.yaml (db + dataset paths)")
 PY
 
 echo "Database: $DB_PATH"
+echo "Note: SQLite is created at start; rows are saved every ~50 addresses (batch_save_size)."
+echo "      Progress logs appear every progress_every rows (default 50). DB file grows mid-run."
 echo "Running: python main.py $*"
-exec python3 main.py "$@"
+exec python3 -u main.py "$@"
