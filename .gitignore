@@ -1,5 +1,6 @@
 data/
 results/
+.address-validation-data/
 *.db
 .venv/
 __pycache__/

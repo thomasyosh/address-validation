@@ -15,7 +15,8 @@ mkdir -p "$PERSIST_DIR"
 
 echo "=== Docker bootstrap ==="
 echo "WORKSPACE=$WORKSPACE_DIR"
-echo "PERSIST (mounted as /data in container)=$PERSIST_DIR"
+echo "PERSIST (host dir, mounted as /data in container)=$PERSIST_DIR"
+echo "  Use workspace subfolder — /tmp mounts often fail on Jenkins Docker agents."
 
 _first_existing_file() {
     local path

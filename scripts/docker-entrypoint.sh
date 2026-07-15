@@ -11,6 +11,8 @@ cd /app
 
 echo "=== Address Search Validation (Docker) ==="
 echo "DATA_DIR=$DATA_DIR"
+echo "Contents of /data (must show config.yaml and address.xlsx):"
+ls -la "${DATA_DIR}/" 2>/dev/null || echo "(cannot list ${DATA_DIR} — volume mount failed)"
 
 if [ -f "${DATA_DIR}/config.yaml" ]; then
     cp "${DATA_DIR}/config.yaml" config.yaml

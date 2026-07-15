@@ -1,12 +1,7 @@
 #!/bin/bash
 # =============================================================================
-# Jenkins Execute shell — DOCKER (recommended when agent has docker, like other jobs)
-#
-# Prerequisites:
-#   - Source Code Management → Git (GitLab URL, branch */main)
-#   - Jenkins agent: docker command available to build user
-#   - Optional File Parameters: address_xlsx, config_yaml, config_local_yaml
-#     (one-time upload; files saved under /tmp/address-validation-data-<job>/)
+# Jenkins Execute shell — DOCKER
+# Paste ENTIRE file into Jenkins → Build → Execute shell.
 # =============================================================================
 
 set -eu
@@ -22,14 +17,22 @@ export HTTP_PROXY="${HTTP_PROXY:-$http_proxy}"
 export HTTPS_PROXY="${HTTPS_PROXY:-$https_proxy}"
 export NO_PROXY="${NO_PROXY:-ase.testingaddress.com,10.77.242.157,10.0.0.0/8,localhost,127.0.0.1}"
 
-PERSIST="/tmp/address-validation-data-${JOB_NAME:-jenkins}"
+# Persist INSIDE workspace — Docker on Jenkins agents often cannot mount /tmp reliably.
+PERSIST="${WORKSPACE}/.address-validation-data"
+OLD_PERSIST="/tmp/address-validation-data-${JOB_NAME:-jenkins}"
 export ADDRESS_VALIDATION_HOME="$PERSIST"
 mkdir -p "$PERSIST" "${WORKSPACE}/results"
 
-# Gentle ASE profile: batch requests, single client thread (see scripts/jenkins_validate_args.sh)
+# One-time migration from older /tmp persist layout
+if [ ! -f "${PERSIST}/config.yaml" ] && [ -d "$OLD_PERSIST" ]; then
+  echo "Migrating data from $OLD_PERSIST to $PERSIST ..."
+  cp -a "${OLD_PERSIST}/." "${PERSIST}/" 2>/dev/null || true
+fi
+
 source "${WORKSPACE}/scripts/jenkins_validate_args.sh"
 echo "ASE fetch profile: batch_size=${ASE_BATCH_SIZE} concurrency=single-thread rps=${ASE_RPS}"
-echo "SQLite DB (grows during fetch): ${PERSIST}/address_validation.db"
+echo "Persist (host) = ${PERSIST}"
+echo "Persist (container) = /data"
 
 if [ ! -f "${WORKSPACE}/Dockerfile" ]; then
   echo "ERROR: ${WORKSPACE}/Dockerfile not found — Git SCM did not checkout the repo."
@@ -39,11 +42,11 @@ fi
 bash "${WORKSPACE}/scripts/jenkins_docker_bootstrap.sh"
 
 if [ ! -f "${PERSIST}/config.yaml" ] || [ ! -f "${PERSIST}/address.xlsx" ]; then
-  echo "ERROR: Bootstrap did not populate ${PERSIST} — see messages above."
+  echo "ERROR: Bootstrap did not populate ${PERSIST}"
   exit 1
 fi
 
-echo "Pre-docker persist check OK:"
+echo "Pre-docker persist check OK (host):"
 ls -la "${PERSIST}/"
 
 echo "Building Docker image: $IMAGE_NAME ..."
@@ -54,8 +57,15 @@ docker build \
   -t "$IMAGE_NAME" \
   "${WORKSPACE}"
 
-# :z helps SELinux agents (RHEL) mount host dirs into Docker
-DOCKER_VOL_OPTS="${DOCKER_VOL_OPTS:-:z}"
+# No :z by default (commit 280acd82 worked without it). Set DOCKER_VOL_OPTS=:z if SELinux requires it.
+VOL_OPTS="${DOCKER_VOL_OPTS:-}"
+
+echo "Verifying Docker can read /data mount ..."
+docker run --rm \
+  --entrypoint /bin/sh \
+  -v "${PERSIST}:/data${VOL_OPTS}" \
+  "$IMAGE_NAME" \
+  -c 'ls -la /data && test -f /data/config.yaml && test -f /data/address.xlsx'
 
 echo "Running validation in container ..."
 docker run --rm \
@@ -65,8 +75,8 @@ docker run --rm \
   -e "HTTPS_PROXY=${HTTPS_PROXY}" \
   -e "NO_PROXY=${NO_PROXY}" \
   -e "PYTHONUNBUFFERED=1" \
-  -v "${PERSIST}:/data${DOCKER_VOL_OPTS}" \
-  -v "${WORKSPACE}/results:/app/results${DOCKER_VOL_OPTS}" \
+  -v "${PERSIST}:/data${VOL_OPTS}" \
+  -v "${WORKSPACE}/results:/app/results${VOL_OPTS}" \
   "$IMAGE_NAME" \
   "${JENKINS_VALIDATE_ARGS[@]}"
 
